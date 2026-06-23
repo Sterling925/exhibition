@@ -1,0 +1,558 @@
+@startuml exhibition_bc
+
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam class {
+    BackgroundColor White
+    BorderColor Black
+    ArrowColor Black
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Enumerations
+' ─────────────────────────────────────────────────────────────────────────────
+package "enumerations" {
+
+    enum Status <<uint8_t>> {
+        Ok
+        QueueFull
+        InvalidSubAddress
+        PayloadTooLarge
+        Timeout
+        RemoteFault
+        CrcFailHeader
+        CrcFailPayload
+        TransportError
+        HandlerError
+    }
+
+    enum MessagePriorities <<uint8_t>> {
+        Critical
+        High
+        Medium
+        Low
+    }
+
+    enum PayloadSizes <<uint8_t>> {
+        size_0
+        size_2
+        size_4
+        size_6
+        size_8
+        size_10
+        size_12
+        size_14
+        size_16
+        size_32
+        size_64
+        size_128
+        size_256
+        size_512
+        size_1024
+        size_2048
+    }
+
+    enum TimeUnits <<uint8_t>> {
+        Centisecond
+        Millisecond
+        Microsecond
+        Nanosecond
+        Picosecond
+    }
+
+    enum SubAddress <<uint8_t>> {
+        System
+        AdcHadc1Ch1
+        CanHcan1
+        GpioInBankB
+        GpioInBankD
+        GpioOutBankC
+        GpioOutBankD
+        GpioOutBankE
+        I2cHi2c1
+        Rtc
+        SpiHspi1
+    }
+
+    enum SystemCmd <<uint8_t>> {
+        GetFingerprint
+        GetDeviceCount
+        GetSysTick
+        GetCoreDeviceId
+        GetCpuId
+        SyncProbe
+        SyncFinal
+        SyncAdjust
+        GetMessageFaultCounter
+        SoftReset
+        ReadMemory
+    }
+
+    enum AdcCmd <<uint8_t>> {
+        Sample
+    }
+
+    enum CanCmd <<uint8_t>> {
+        TxFrame
+        RxFrame
+    }
+
+    enum GpioInputCmd <<uint8_t>> {
+        Read
+    }
+
+    enum GpioOutputCmd <<uint8_t>> {
+        Set
+        Clear
+    }
+
+    enum I2cCmd <<uint8_t>> {
+        WriteReg
+        ReadReg
+    }
+
+    enum RtcCmd <<uint8_t>> {
+        SetDatetime
+        GetDatetime
+    }
+
+    enum SpiCmd <<uint8_t>> {
+        Tx
+        Rx
+    }
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Communication layer
+' ─────────────────────────────────────────────────────────────────────────────
+package "communication" {
+
+    interface IClock {
+        + {abstract} now_ms() : uint32_t
+    }
+
+    interface IFrameTransport {
+        + {abstract} send(bytes : uint8_t const*, length : uint32_t) : int32_t
+        + {abstract} receive(out : uint8_t*, max_length : uint32_t) : int32_t
+        + {abstract} reset_rx() : void
+    }
+
+    interface ISubAddressHandler {
+        + {abstract} handle(cmd_header : MessageHeader const&, cmd_payload : uint8_t const*, resp_buf : uint8_t*, resp_buf_max : uint32_t, resp_len_out : uint32_t&) : Status
+    }
+
+    interface IBusFaultObserver {
+        + {abstract} on_fault(sub_addr : uint8_t, status : Status, will_retry : bool) : void
+    }
+
+    class MessageHeader {
+        - m_header : uint8_t[6]
+        --
+        + MessageHeader()
+        + set_priority(p : MessagePriorities) : void
+        + set_command_flag(f : bool) : void
+        + set_size(s : PayloadSizes) : void
+        + set_fault_flag(fault : bool) : void
+        + set_sub_address(addr : uint8_t) : void
+        + set_payload_crc(crc : uint16_t) : void
+        + update_header_crc() : void
+        + deserialize(buffer : uint8_t const*) : bool
+        + get_priority() : MessagePriorities
+        + get_command_flag() : bool
+        + get_size() : PayloadSizes
+        + get_size_bytes() : uint32_t
+        + get_fault_flag() : bool
+        + get_priority_byte() : uint8_t
+        + get_sub_address() : uint8_t
+        + get_payload_crc() : uint16_t
+        + get_header_crc() : uint16_t
+        + check_header_crc() : bool
+        + serialize(buffer : uint8_t*, buffer_max_size : uint32_t) : bool
+    }
+
+    class Request <<struct>> {
+        + sub_address  : uint8_t
+        + priority     : MessagePriorities
+        + is_read      : bool
+        + cmd_size     : PayloadSizes
+        + cmd_len      : uint32_t
+        + cmd_ext      : uint8_t const*
+        + cmd_inline   : uint8_t[kInlinePayloadBytes]
+        + resp_ext     : uint8_t*
+        + resp_buf_max : uint32_t
+    }
+
+    class SyncFixed <<struct>> {
+        + path_delay_whole : uint32_t
+        + path_delay_frac  : uint32_t
+        + offset_whole     : int32_t
+        + offset_frac      : int32_t
+    }
+
+    class SyncState {
+        - m_units : uint8_t
+        - m_t1    : uint32_t
+        - m_t2    : uint32_t
+        - m_t3    : uint32_t
+        --
+        + SyncState()
+        + on_probe(units : uint8_t, t1 : uint32_t, rx_now : uint32_t, tx_now : uint32_t, resp : uint8_t*) : uint32_t
+        + on_final(t4 : uint32_t, resp : uint8_t*, result_out : SyncFixed&) : uint32_t
+        + units() : uint8_t
+        + t2() : uint32_t
+        + t3() : uint32_t
+    }
+
+    class BusController {
+        - m_transport       : IFrameTransport&
+        - m_clock           : IClock&
+        - m_fault_observer  : IBusFaultObserver*
+        - m_queue           : QueuedReq[kBcQueueDepth]
+        - m_queue_len       : uint8_t
+        - m_active_sa       : uint8_t
+        - m_slots           : BcSlot[kMaxSubAddresses]
+        - m_fault_counter   : FaultCounter
+        --
+        + BusController(transport : IFrameTransport&, clock : IClock&, fault_observer : IBusFaultObserver*)
+        + submit(req : Request const&, cb : CompletionFn, user : void*, status_out : Status&) : bool
+        + tick() : void
+        + pending_count() : uint8_t
+        + fault_count() : uint32_t
+        - build_cmd_header(req : Request const&, out : MessageHeader&) : void
+        - enqueue_sorted(q : QueuedReq const&) : bool
+        - start_next_if_possible() : void
+        - advance_slot(sub_addr : uint8_t, did_send : bool&, did_recv : bool&) : void
+        - complete_slot(sub_addr : uint8_t, status : Status) : void
+        - fail_slot(sub_addr : uint8_t, status : Status) : void
+    }
+
+    class RemoteTerminal {
+        - m_transport         : IFrameTransport&
+        - m_clock             : IClock&
+        - m_handlers          : ISubAddressHandler*[kMaxSubAddresses]
+        - m_state             : RtState
+        - m_active_cmd_header : MessageHeader
+        - m_deadline_ms       : uint32_t
+        - m_cmd_payload       : uint8_t[kMaxPayloadBytes]
+        - m_resp_payload      : uint8_t[kMaxPayloadBytes]
+        - m_resp_len          : uint32_t
+        --
+        + RemoteTerminal(transport : IFrameTransport&, clock : IClock&)
+        + register_handler(sub_addr : uint8_t, handler : ISubAddressHandler*) : bool
+        + tick() : void
+        - send_ack(sub_addr : uint8_t, prio : MessagePriorities, size : PayloadSizes, fault : bool, payload : uint8_t const*, payload_len : uint32_t) : bool
+        - send_fault(sub_addr : uint8_t, prio : MessagePriorities, code : Status) : bool
+        - abort_rx() : void
+    }
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Host layer
+' ─────────────────────────────────────────────────────────────────────────────
+package "host" {
+
+    class Logger {
+        - m_mutex : std::mutex
+        - m_out   : std::ofstream
+        - m_path  : std::string
+        - m_open  : bool
+        --
+        + Logger(path : std::string const&)
+        + ~Logger()
+        + {static} default_log_path() : std::string
+        + is_open() : bool
+        + path() : std::string const&
+        + line(level : char const*, msg : std::string const&) : void
+        + hex(level : char const*, prefix : char const*, data : uint8_t const*, len : uint32_t) : void
+        - timestamp() : std::string
+    }
+
+    class StdSteadyClock {
+        - m_origin : steady_clock::time_point
+        --
+        + StdSteadyClock()
+        + now_ms() : uint32_t
+    }
+
+    class SerialFrameTransport {
+        - m_fd               : int
+        - m_rx_state         : RxState
+        - m_expected_payload : uint32_t
+        - m_rx_buf           : uint8_t[kMaxPayloadBytes]
+        - m_rx_filled        : uint32_t
+        --
+        + SerialFrameTransport()
+        + ~SerialFrameTransport()
+        + open(device_path : char const*, baud : uint32_t) : bool
+        + close() : void
+        + is_open() : bool
+        + send(bytes : uint8_t const*, length : uint32_t) : int32_t
+        + receive(out : uint8_t*, max_length : uint32_t) : int32_t
+        + reset_rx() : void
+    }
+
+    class LoggingFrameTransport {
+        - m_inner            : IFrameTransport&
+        - m_log              : Logger&
+        - m_op_name          : OpNameFn
+        - m_sub_address_name : SubAddrNameFn
+        - m_tx_state         : TxState
+        - m_tx_cmd_sa        : uint8_t
+        - m_rx_state         : RxState
+        - m_rx_sa            : uint8_t
+        --
+        + LoggingFrameTransport(inner : IFrameTransport&, log : Logger&, op_name : OpNameFn, sub_address_name : SubAddrNameFn)
+        + send(bytes : uint8_t const*, length : uint32_t) : int32_t
+        + receive(out : uint8_t*, max_length : uint32_t) : int32_t
+        + reset_rx() : void
+        - sa_name(sub_address : uint8_t) : char const*
+    }
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' RT Client layer
+' ─────────────────────────────────────────────────────────────────────────────
+package "rt_client" {
+
+    class SyncMeasurement <<struct>> {
+        + path_delay_units : double
+        + offset_units     : double
+        + reload_ticks     : uint32_t
+        + units            : uint8_t
+    }
+
+    class SyncAdjustResult <<struct>> {
+        + avg_skew_ppb : int32_t
+        + reload_ticks : uint32_t
+    }
+
+    class AdcClient {
+        - m_bc    : BusController&
+        - m_clock : IClock&
+        - m_log   : Logger&
+        - m_sa    : SubAddress
+        --
+        + AdcClient(bc : BusController&, clock : IClock&, log : Logger&, sub_address : SubAddress)
+        + sample(counts_out : uint16_t&, timestamp_ms_out : uint32_t&) : Status
+    }
+
+    class CanClient {
+        - m_bc    : BusController&
+        - m_clock : IClock&
+        - m_log   : Logger&
+        - m_sa    : SubAddress
+        --
+        + CanClient(bc : BusController&, clock : IClock&, log : Logger&, sub_address : SubAddress)
+        + tx_frame(id : uint32_t, dlc : uint8_t, data : uint8_t const[8]) : Status
+        + rx_frame(id_out : uint32_t&, dlc_out : uint8_t&, data_out : uint8_t[8]) : Status
+    }
+
+    class GpioInputClient {
+        - m_bc      : BusController&
+        - m_clock   : IClock&
+        - m_log     : Logger&
+        - m_sa      : SubAddress
+        - m_pin_idx : uint8_t
+        --
+        + GpioInputClient(bc : BusController&, clock : IClock&, log : Logger&, sub_address : SubAddress, pin_index : uint8_t)
+        + read(value_out : bool&) : Status
+    }
+
+    class GpioOutputClient {
+        - m_bc      : BusController&
+        - m_clock   : IClock&
+        - m_log     : Logger&
+        - m_sa      : SubAddress
+        - m_pin_idx : uint8_t
+        --
+        + GpioOutputClient(bc : BusController&, clock : IClock&, log : Logger&, sub_address : SubAddress, pin_index : uint8_t)
+        + set() : Status
+        + clear() : Status
+    }
+
+    class I2cClient {
+        - m_bc    : BusController&
+        - m_clock : IClock&
+        - m_log   : Logger&
+        - m_sa    : SubAddress
+        --
+        + I2cClient(bc : BusController&, clock : IClock&, log : Logger&, sub_address : SubAddress)
+        + write_reg(addr7 : uint8_t, reg : uint8_t, data : uint8_t const*, len : uint8_t) : Status
+        + read_reg(addr7 : uint8_t, reg : uint8_t, len : uint8_t, data_out : uint8_t*) : Status
+    }
+
+    class RtcClient {
+        - m_bc    : BusController&
+        - m_clock : IClock&
+        - m_log   : Logger&
+        - m_sa    : SubAddress
+        --
+        + RtcClient(bc : BusController&, clock : IClock&, log : Logger&, sub_address : SubAddress)
+        + set_datetime(year_offset : uint8_t, month : uint8_t, day : uint8_t, weekday : uint8_t, hours : uint8_t, minutes : uint8_t, seconds : uint8_t) : Status
+        + get_datetime(year_offset_out : uint8_t&, month_out : uint8_t&, day_out : uint8_t&, weekday_out : uint8_t&, hours_out : uint8_t&, minutes_out : uint8_t&, seconds_out : uint8_t&) : Status
+    }
+
+    class SpiClient {
+        - m_bc    : BusController&
+        - m_clock : IClock&
+        - m_log   : Logger&
+        - m_sa    : SubAddress
+        --
+        + SpiClient(bc : BusController&, clock : IClock&, log : Logger&, sub_address : SubAddress)
+        + tx(data : uint8_t const*, len : uint16_t) : Status
+        + rx(len : uint16_t, data_out : uint8_t*) : Status
+    }
+
+    class LoggerFaultObserver {
+        - m_log : Logger&
+        --
+        + LoggerFaultObserver(log : Logger&)
+        + on_fault(sub_addr : uint8_t, status : Status, will_retry : bool) : void
+    }
+
+    class RtClient {
+        - m_fault_observer : LoggerFaultObserver
+        - m_bc            : BusController
+        - m_clock         : IClock&
+        - m_log           : Logger&
+        - m_have_sync     : bool
+        - m_offset        : double
+        - m_path_delay    : double
+        - m_reload_ticks  : uint32_t
+        - m_sync_units    : uint8_t
+        --
+        + RtClient(transport : IFrameTransport&, clock : IClock&, log : Logger&)
+        + get_api_fingerprint(fingerprint_out : uint32_t&) : Status
+        + get_device_count(count_out : uint16_t&) : Status
+        + get_sys_tick(ticks_out : uint32_t&) : Status
+        + get_core_device_id(devid_out : uint32_t&, revid_out : uint32_t&) : Status
+        + get_cpu_id(uid0 : uint32_t&, uid1 : uint32_t&, uid2 : uint32_t&) : Status
+        + get_message_fault_counter(count_out : uint32_t&) : Status
+        + soft_reset() : Status
+        + read_memory(address : uint32_t, len : uint16_t, data_out : uint8_t*) : Status
+        + verify_fingerprint() : Status
+        + sync_once(raw_out : SyncMeasurement*) : Status
+        + has_sync() : bool
+        + clock_offset_units() : double
+        + path_delay_units() : double
+        + reload_ticks() : uint32_t
+        + sync_units() : uint8_t
+        + sync_adjust(out : SyncAdjustResult*) : Status
+        + bc_fault_count() : uint32_t
+        --
+        + adc_hadc1_ch1 : AdcClient
+        + can_hcan1     : CanClient
+        + gpio_PB2  : GpioInputClient
+        + gpio_PD5  : GpioInputClient
+        + gpio_PC0  : GpioOutputClient
+        + gpio_PD4  : GpioOutputClient
+        + gpio_PD12 : GpioOutputClient
+        + gpio_PD13 : GpioOutputClient
+        + gpio_PD14 : GpioOutputClient
+        + gpio_PD15 : GpioOutputClient
+        + gpio_PE3  : GpioOutputClient
+        + i2c_hi2c1 : I2cClient
+        + rtc       : RtcClient
+        + spi_hspi1 : SpiClient
+    }
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Inheritance
+' ─────────────────────────────────────────────────────────────────────────────
+StdSteadyClock        --|> IClock
+SerialFrameTransport  --|> IFrameTransport
+LoggingFrameTransport --|> IFrameTransport
+LoggerFaultObserver   --|> IBusFaultObserver
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Composition / Aggregation
+' ─────────────────────────────────────────────────────────────────────────────
+
+' RtClient owns the fault observer, BusController, and all peripheral clients
+RtClient *-- LoggerFaultObserver
+RtClient *-- BusController
+RtClient *-- AdcClient
+RtClient *-- CanClient
+RtClient *-- GpioInputClient
+RtClient *-- GpioOutputClient
+RtClient *-- I2cClient
+RtClient *-- RtcClient
+RtClient *-- SpiClient
+RtClient o-- IClock  : m_clock
+RtClient o-- Logger  : m_log
+
+' BusController depends on transport + clock, and notifies an optional fault observer
+BusController o-- IFrameTransport   : m_transport
+BusController o-- IClock            : m_clock
+BusController o-- IBusFaultObserver : m_fault_observer
+
+' RemoteTerminal depends on transport, clock, and handler registry
+RemoteTerminal o-- IFrameTransport    : m_transport
+RemoteTerminal o-- IClock             : m_clock
+RemoteTerminal o-- ISubAddressHandler : handlers[]
+
+' LoggingFrameTransport wraps another transport (decorator)
+LoggingFrameTransport o-- IFrameTransport : "m_inner (wraps)"
+LoggingFrameTransport o-- Logger          : m_log
+
+' Peripheral clients reference BusController, IClock, Logger
+AdcClient        o-- BusController : m_bc
+AdcClient        o-- IClock        : m_clock
+AdcClient        o-- Logger        : m_log
+
+CanClient        o-- BusController : m_bc
+CanClient        o-- IClock        : m_clock
+CanClient        o-- Logger        : m_log
+
+RtcClient        o-- BusController : m_bc
+RtcClient        o-- IClock        : m_clock
+RtcClient        o-- Logger        : m_log
+
+LoggerFaultObserver o-- Logger     : m_log
+
+GpioInputClient  o-- BusController : m_bc
+GpioInputClient  o-- IClock        : m_clock
+GpioInputClient  o-- Logger        : m_log
+
+GpioOutputClient o-- BusController : m_bc
+GpioOutputClient o-- IClock        : m_clock
+GpioOutputClient o-- Logger        : m_log
+
+I2cClient        o-- BusController : m_bc
+I2cClient        o-- IClock        : m_clock
+I2cClient        o-- Logger        : m_log
+
+SpiClient        o-- BusController : m_bc
+SpiClient        o-- IClock        : m_clock
+SpiClient        o-- Logger        : m_log
+
+' MessageHeader uses enums
+MessageHeader ..> MessagePriorities
+MessageHeader ..> PayloadSizes
+
+' Request uses enums
+Request ..> MessagePriorities
+Request ..> PayloadSizes
+
+' BusController and peripheral clients produce Status results
+BusController      ..> Status
+AdcClient          ..> Status
+CanClient          ..> Status
+GpioInputClient    ..> Status
+GpioOutputClient   ..> Status
+I2cClient          ..> Status
+RtcClient          ..> Status
+SpiClient          ..> Status
+RtClient           ..> Status
+ISubAddressHandler ..> Status
+
+' SyncState produces SyncFixed data
+SyncState ..> SyncFixed
+
+' RtClient sync produces SyncMeasurement and SyncAdjustResult
+RtClient  ..> SyncMeasurement
+RtClient  ..> SyncAdjustResult
+
+@enduml

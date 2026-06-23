@@ -1,0 +1,10 @@
+build/*
+CMakeCache.txt
+CMakeFiles/*
+stm32cubemx/CMakeFiles/*
+cmake/stm32cubemx/CMakeFiles/*
+Makefile
+stm32cubemx/Makefile
+cmake_install.cmake
+compile_commands.json
+

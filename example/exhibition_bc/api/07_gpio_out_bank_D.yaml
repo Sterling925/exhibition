@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 7
+name: gpio_out_bank_D
+description: GPIO output bank D
+type: gpio_out
+service_hash: 0x6D212AAE
+port: GPIOD
+pin_mask: 0xF010
+pins:
+  - { name: gpio_PD4, label: Audio_RST [CS43L22_RESET], pin_idx: 4 }
+  - { name: gpio_PD12, label: LD4 [Green Led], pin_idx: 12 }
+  - { name: gpio_PD13, label: LD3 [Orange Led], pin_idx: 13 }
+  - { name: gpio_PD14, label: LD5 [Red Led], pin_idx: 14 }
+  - { name: gpio_PD15, label: LD6 [Blue Led], pin_idx: 15 }
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: SET
+    description: Set GPIO pin (high)
+    cmd_payload:
+      bytes: 2
+      fields:
+        - opcode: uint8_t
+        - pin_idx: uint8_t
+    resp_payload:
+      bytes: 0
+  - opcode: 0x02
+    name: CLEAR
+    description: Clear GPIO pin (low)
+    cmd_payload:
+      bytes: 2
+      fields:
+        - opcode: uint8_t
+        - pin_idx: uint8_t
+    resp_payload:
+      bytes: 0

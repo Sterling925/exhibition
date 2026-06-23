@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 8
+name: gpio_out_bank_E
+description: GPIO output bank E
+type: gpio_out
+service_hash: 0x6D212AAE
+port: GPIOE
+pin_mask: 0x0008
+pins:
+  - { name: gpio_PE3, label: CS_I2C/SPI [LIS302DL_CS_I2C/SPI], pin_idx: 3 }
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: SET
+    description: Set GPIO pin (high)
+    cmd_payload:
+      bytes: 2
+      fields:
+        - opcode: uint8_t
+        - pin_idx: uint8_t
+    resp_payload:
+      bytes: 0
+  - opcode: 0x02
+    name: CLEAR
+    description: Clear GPIO pin (low)
+    cmd_payload:
+      bytes: 2
+      fields:
+        - opcode: uint8_t
+        - pin_idx: uint8_t
+    resp_payload:
+      bytes: 0

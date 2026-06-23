@@ -1,0 +1,164 @@
+# Command catalog for the system handler (sub-address 1).
+#
+# Authoritative source for the system opcode vocabulary. The generator
+# turns this into the C++ `SystemCmd` enum and into the per-sub-address
+# manifest entry for sub-address 1. Edit here to change opcode numbering
+# or names; the matching handler behavior lives in the C++ system handler.
+kind: system
+cpp_enum: SystemCmd
+commands:
+  # Universal command, present on every sub-address. The RemoteTerminal answers
+  # opcode 0x00 framework-side (before the handler runs) with this sub-address's
+  # per-service API hash, so the BC can localize which service diverged when the
+  # global fingerprint mismatches. Opcode 0x00 is reserved protocol-wide.
+  - name: GET_SERVICE_HASH
+    opcode: "0x00"
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - service_hash: uint32_t
+  - name: GET_FINGERPRINT
+    opcode: "0x01"
+    description: Get the API fingerprint
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - fingerprint: uint32_t
+  - name: GET_DEVICE_COUNT
+    opcode: "0x02"
+    description: Get the attached device count
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "2"
+      fields:
+        - count: uint16_t
+  - name: GET_SYS_TICK
+    opcode: "0x03"
+    description: Get the system tick count
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - systick: uint32_t
+  - name: GET_CORE_DEVICE_ID
+    opcode: "0x04"
+    description: Get the core device identifier
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "8"
+      fields:
+        - devid: uint32_t
+        - revid: uint32_t
+  - name: GET_CPU_ID
+    opcode: "0x05"
+    description: Get the unique CPU ID
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "12"
+      fields:
+        - uid0: uint32_t
+        - uid1: uint32_t
+        - uid2: uint32_t
+  # Time synchronization sub-routine (NTP four-timestamp offset/delay with a
+  # sliding min-delay clock filter on the RT). The doc's logical opcodes 0/1 map
+  # onto the System command space here (0x06/0x07) so they share the single
+  # SystemCmd dispatch. Both commands carry [opcode, units, uint32 value]; units is
+  # a negative power of ten (milliseconds == 3). The probe returns the RT receive
+  # instant T2 and the RT response-send instant T3 (so the RT handling time is
+  # removed from the round trip). The offset is the BC clock minus the RT clock (the
+  # correction the RT adds to its local tick to recover BC time). See sync.h.
+  - name: SYNC_PROBE
+    opcode: "0x06"
+    description: Time-sync round-trip probe
+    cmd_payload:
+      bytes: "6"
+      fields:
+        - opcode: uint8_t
+        - units: uint8_t
+        - t1: uint32_t
+    resp_payload:
+      bytes: "8"
+      fields:
+        - t2: uint32_t
+        - t3: uint32_t
+  - name: SYNC_FINAL
+    opcode: "0x07"
+    description: Apply final time-sync offset
+    cmd_payload:
+      bytes: "6"
+      fields:
+        - opcode: uint8_t
+        - units: uint8_t
+        - t4: uint32_t
+    resp_payload:
+      bytes: "16"
+      fields:
+        - path_delay_whole: uint32_t
+        - path_delay_frac: uint32_t
+        - offset_whole: int32_t
+        - offset_frac: int32_t
+  # Apply one smoothed, bounded SysTick-reload adjustment from the skew averaged over
+  # the preceding telemetry phase (the repeating SYNC_PROBE/SYNC_FINAL exchanges).
+  # The reload moves a fraction of the way toward the rate that cancels the skew and
+  # stays within +/-10% of nominal, so the clocks lock over several telemetry/adjust
+  # cycles. See next_tick_reload in sync.h.
+  - name: SYNC_ADJUST
+    opcode: "0x08"
+    description: Apply incremental clock adjustment
+    cmd_payload:
+      bytes: "1"
+      fields:
+        - opcode: uint8_t
+    resp_payload:
+      bytes: "8"
+      fields:
+        - skew_ppb: int32_t
+        - systick_reload: uint32_t
+  # Diagnostic: running count of inbound messages the RT dropped due to a
+  # timeout or a CRC / malformed frame (see FaultCounter in the scheduler).
+  - name: GET_MESSAGE_FAULT_COUNTER
+    opcode: "0x09"
+    description: Get the message fault counter
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - fault_counter: uint32_t
+  # Write-only. RT sends a size-0 write-ack then resets via
+  # HAL_NVIC_SystemReset() once the main loop detects reset_pending().
+  - name: SOFT_RESET
+    opcode: "0x0A"
+    description: Trigger a soft reset
+    cmd_payload:
+      bytes: "1"
+      fields:
+        - opcode: uint8_t
+    resp_payload:
+      bytes: "0"
+  # Read an arbitrary region of memory. The command carries the byte address and
+  # the number of bytes to read; the response is that many raw bytes. The handler
+  # rejects any length that will not fit the current max response frame
+  # (resp_buf_max) and guards against an address+length 32-bit wraparound.
+  - name: READ_MEMORY
+    opcode: "0x0B"
+    description: Read an arbitrary region of memory
+    cmd_payload:
+      bytes: "7"
+      fields:
+        - opcode: uint8_t
+        - address: uint32_t
+        - length: uint16_t
+    resp_payload:
+      bytes: "len"
+      fields:
+        - data: uint8_t[]

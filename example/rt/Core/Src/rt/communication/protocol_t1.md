@@ -1,0 +1,402 @@
+<!--
+SPDX-License-Identifier: MIT OR Apache-2.0
+SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+-->
+
+# Protocol T1 Specification
+
+## 1. Overview
+
+**Protocol T1** is a compact, half-duplex, frame-based communication protocol
+designed for use over byte-stream physical links (UART, USB CDC, RS-422, etc.).
+It defines the structure of every frame on the wire: a common six-byte header,
+an acknowledgment mechanism, and a fixed set of payload sizes. It does **not**
+define the encoding of application payloads — the content carried inside a
+payload frame is determined entirely by the application layer.
+
+The model is a single **Bus Controller** (BC) paired with one or more
+**Remote Terminals** (RTs):
+
+- The BC is the only initiator. It sends command frames and waits for responses.
+- Each RT listens, processes commands, and replies. It never transmits
+  unsolicited frames.
+- Only one transaction is in flight at any time (half-duplex).
+
+---
+
+## 2. Scope
+
+Protocol T1 specifies:
+
+- The 6-byte frame header structure and bit layout.
+- The supported payload size set and how sizes are encoded in the header.
+- The CRC algorithm used for both header and payload integrity.
+- The transaction wire flows (command, acknowledgment, response).
+- Fault signaling via the header fault bit.
+- Sub-address routing within a single physical link.
+- Transport-level framing requirements (`send`, `receive`, `reset_rx` semantics).
+
+Protocol T1 does **not** specify:
+
+- How application payloads are encoded or interpreted. That is the
+  responsibility of the application (or a higher-level protocol layer).
+- Which physical or link layer carries the frames.
+- Addressing or discovery beyond the 8-bit sub-address field.
+- Encryption or authentication.
+
+---
+
+## 3. Frame Header
+
+Every Protocol T1 frame begins with a 6-byte header. The header is always
+present.
+
+### 3.1 Header Byte Layout
+
+```
+Byte 0 (flags):
+  Bits 7-6  Priority         (2 bits)
+  Bit  5    Command flag     (1 bit)
+  Bit  4    Large frame      (1 bit)
+  Bits 3-1  Transmitted size (3 bits)
+  Bit  0    Fault flag       (1 bit)  [INVERTED POLARITY — see below]
+
+Byte 1:
+  Bits 7-0  Sub-address      (8 bits)
+
+Bytes 2-3:
+  Payload CRC-16/MODBUS, little-endian
+
+Bytes 4-5:
+  Header CRC-16/MODBUS, little-endian
+```
+
+### 3.2 Field Descriptions
+
+| Field | Bits | Description |
+|---|---|---|
+| **Priority** | 2 | Transaction priority. Lower numerical value = higher priority. `0` = Critical, `1` = High, `2` = Medium, `3` = Low. |
+| **Command flag** | 1 | `1` = this is a command frame (BC→RT). `0` = this is a response frame (RT→BC). |
+| **Large frame** | 1 | Selects the payload size table. `0` = small table (0–14 B). `1` = large table (16–2048 B). |
+| **Transmitted size** | 3 | Index into the selected size table (see Section 4). Together with the large-frame bit this selects one of 16 discrete payload sizes. |
+| **Fault flag** | 1 | **Inverted polarity: `0` means a fault is present; `1` means no fault.** A default-constructed header is fault-flagged (`0`) until explicitly cleared. This ensures an all-zero or uninitialized buffer cannot be misread as a valid, fault-free frame. |
+| **Sub-address** | 8 | Routes the frame to a specific endpoint on the RT. Value `0` is reserved and must not be used. See Section 7. |
+| **Payload CRC** | 16 | CRC-16/MODBUS over the payload bytes (Section 5). Set to `0` when the declared payload size is zero. |
+| **Header CRC** | 16 | CRC-16/MODBUS over header bytes 0–3 only (Section 5). Must be recomputed any time fields 0–3 change. |
+
+### 3.3 Header Integrity
+
+A receiver must validate the header CRC before trusting any other field in the
+header. A header whose CRC does not match must be silently discarded — the
+sub-address and priority cannot be trusted, so no fault response is sent.
+
+---
+
+## 4. Payload Sizes
+
+Protocol T1 supports a sparse, fixed set of payload sizes. The 4-bit encoding
+(large-frame bit + 3-bit index) maps to byte counts as follows:
+
+| Large-frame bit | Index (bits 3-1) | Payload bytes |
+|---|---|---|
+| 0 | 0 | 0 |
+| 0 | 1 | 2 |
+| 0 | 2 | 4 |
+| 0 | 3 | 6 |
+| 0 | 4 | 8 |
+| 0 | 5 | 10 |
+| 0 | 6 | 12 |
+| 0 | 7 | 14 |
+| 1 | 0 | 16 |
+| 1 | 1 | 32 |
+| 1 | 2 | 64 |
+| 1 | 3 | 128 |
+| 1 | 4 | 256 |
+| 1 | 5 | 512 |
+| 1 | 6 | 1024 |
+| 1 | 7 | 2048 |
+
+The sender always chooses the **smallest size that fits** the logical payload.
+The receiver reads exactly the declared number of bytes as the payload frame.
+There is no 1-byte size; the minimum non-empty payload is 2 bytes.
+
+---
+
+## 5. Payload Padding
+
+When a logical payload does not fill the declared frame size, the remaining
+bytes must be padded. The receiver will read the full declared size regardless,
+so both ends must agree on a padding convention to avoid misinterpreting
+trailing bytes.
+
+Common conventions:
+
+- **Zero-fill** — append `0x00` bytes to the declared frame size. Simple to
+  implement; straightforward to verify in a debugger or logic analyzer.
+- **Alignment-padded structs** — define the payload as a packed C/C++ struct
+  where the compiler inserts natural alignment padding. Efficient to parse
+  on platforms that support unaligned access, but the layout is
+  compiler/toolchain dependent and must be documented carefully for
+  cross-platform implementations.
+- **Length-prefixed** — include an explicit byte count at a known offset
+  within the payload so the receiver can determine the valid portion
+  regardless of trailing content. More robust to extension but costs at
+  least one byte per frame.
+
+Whatever convention is chosen must be applied consistently by both the BC and
+all RT implementations that participate in a given protocol deployment.
+
+If an application protocol is designed on top of T1, it should be formed
+to take advantage of the given sizes. It can be more efficient to send a response
+with some other useful data, instead of just sending some padding with it.
+
+
+---
+
+## 6. CRC Algorithm
+
+Protocol T1 uses **CRC-16/MODBUS** for both CRC fields.
+
+| Parameter | Value |
+|---|---|
+| Width | 16 bits |
+| Polynomial | 0x8005 (reflected: 0xA001) |
+| Initial value | 0xFFFF |
+| Input reflected | Yes |
+| Output reflected | Yes |
+| Final XOR | 0x0000 |
+| Check value | 0xB4C8 (CRC of the ASCII string "123456789") |
+
+### 6.1 Header CRC
+
+Covers header bytes 0–3 (priority/flags byte, sub-address byte, and the two
+payload CRC bytes). Stored in header bytes 4–5, little-endian. The header CRC
+must be recomputed any time bytes 0–3 change.
+
+### 6.2 Payload CRC
+
+Covers the payload bytes that follow the header. Stored in header bytes 2–3
+(little-endian) as part of the header. Set to `0x0000` when the declared
+payload size is zero (no payload is transmitted).
+
+The payload CRC is computed over the full declared frame size — including any
+padding bytes — so padding convention directly affects the CRC value. Both
+ends must pad identically before computing or verifying the CRC.
+
+---
+
+## 7. Sub-addressing
+
+The sub-address field (byte 1) routes a frame to a specific logical endpoint
+(sub-component) on the RT. This allows a single physical link to serve multiple
+independent handlers on one RT.
+
+- **Value `0` is reserved** by the protocol and must never appear in a valid
+  command or response frame.
+- Values `1` through `255` are usable. A specific deployment may cap the
+  upper bound lower (an implementation with 8-bit slot tables that only
+  allocates 32 entries, for example, treats values ≥ 32 as invalid).
+- On a command frame the sub-address identifies the destination handler.
+- On a response frame the sub-address echoes which handler produced the response.
+- Sub-address assignment (which physical device or function maps to which
+  number) is an application-layer concern not defined by Protocol T1.
+
+---
+
+## 8. Transaction Wire Flow
+
+All transactions are initiated by the BC. Each frame on the wire is either a
+6-byte header or a payload block of the size declared in the most recent header.
+
+### 8.1 Write — non-zero command payload (size X > 0)
+
+```
+BC → RT : command header    (cmd=1, sub-addr=A, size=X)
+RT → BC : ack header        (cmd=0, sub-addr=A, size=0, fault=OK)
+BC → RT : command payload   (X bytes)
+RT → BC : ack header        (cmd=0, sub-addr=A, size=0, fault=OK)
+```
+
+### 8.2 Read — non-zero command payload, non-zero response (size X > 0, response size Y > 0)
+
+```
+BC → RT : command header    (cmd=1, sub-addr=A, size=X)
+RT → BC : ack header        (cmd=0, sub-addr=A, size=0, fault=OK)
+BC → RT : command payload   (X bytes)
+RT → BC : response header   (cmd=0, sub-addr=A, size=Y, fault=OK)
+RT → BC : response payload  (Y bytes)
+```
+In every sequence both sides know the exact size of the next chunk before it
+arrives. This lets the receive drivers read a known length in one shot (lower CPU
+load), though falling back to smaller reads is still required to recover from a
+desync. It also lets payload sizes be negotiated at run time — a read size can be
+agreed per transaction, or rejected if too large for one side to buffer — at the
+cost of the extra round trip's latency.
+
+
+### 8.3 Size-0 write (no command payload)
+
+The intermediate payload and its ack collapse. The BC sends only a command
+header; the RT acknowledges with a single size-0 response header.
+
+```
+BC → RT : command header    (cmd=1, sub-addr=A, size=0)
+RT → BC : ack header        (cmd=0, sub-addr=A, size=0, fault=OK)
+```
+
+### 8.4 Size-0 read (no command payload, non-zero response)
+
+No command payload is sent, so the intermediate ack is omitted. The RT replies
+with the response header and payload immediately.
+
+```
+BC → RT : command header    (cmd=1, sub-addr=A, size=0)
+RT → BC : response header   (cmd=0, sub-addr=A, size=Y, fault=OK)
+RT → BC : response payload  (Y bytes)
+```
+
+---
+
+## 9. Fault Handling
+
+### 9.1 Fault Bit Polarity
+
+The fault bit in byte 0 has **inverted polarity**:
+
+- **`0`** = a fault is being reported.
+- **`1`** = no fault (normal frame).
+
+This means a zeroed or uninitialized header is fault-flagged by default. A
+receiver should never treat a header with the fault bit cleared as a normal
+transaction frame.
+
+### 9.2 RT-Generated Fault Responses
+
+When the RT detects a protocol fault it replaces the normal ack or response with
+a fault frame: a header with the fault bit cleared (`0`) followed by a payload
+carrying the cause.
+
+**Self-describing fault payload (v2).** The payload is *self-describing*: its
+first byte names the domain that the following bytes are to be interpreted in,
+so a receiver dispatches on the domain rather than assuming every fault byte is a
+`Status` value.
+
+Fault payload format:
+
+- Byte 0: **fault domain** tag (see table below).
+- Byte 1: **reason code** within that domain. For the `Protocol` domain this is a
+  `Status` value; for other domains it is domain-specific.
+- Bytes 2..N: optional domain-specific detail (handler faults only).
+
+| `FaultDomain` | Value | Byte 1.. is |
+|---|---|---|
+| `Protocol` | `0` | A `Status` value emitted by the RT protocol layer. |
+| `Hal` | `1` | A HAL/driver return code. *Reserved — not emitted yet.* |
+| `App` | `2` | Application-defined fault detail supplied by a handler. |
+
+A **protocol-level** fault is always exactly 2 bytes — `{ Protocol, <Status> }`
+in the size-2 slot. A **handler-level** fault is `{ App, <handler bytes...> }`:
+the RT auto-prepends the `App` tag ahead of whatever the handler wrote, so the
+host can never mistake handler/HAL detail for a `Status` code.
+
+> **Size-slot rounding.** Because the prepended domain byte adds one octet and
+> the protocol only carries the discrete payload sizes (0, 2, 4, …), a handler
+> fault may round up one size slot — e.g. a 2-byte detail becomes 3 bytes and is
+> sent in the size-4 slot (last byte zero-padded). Protocol faults are
+> unaffected (always size-2).
+
+Conditions that cause RT to emit a fault response:
+
+| Condition | Domain | Byte 1.. |
+|---|---|---|
+| Sub-address is 0, out of range, or has no registered handler | `Protocol` | `InvalidSubAddress` |
+| Command payload CRC does not match the header's payload CRC field | `Protocol` | `CrcFailPayload` |
+| Command's declared payload size exceeds the RT's receive buffer | `Protocol` | `PayloadTooLarge` |
+| Application handler returns a non-Ok status | `App` | Handler-supplied bytes |
+
+> **Compatibility.** This v2 payload format is a breaking change from the prior
+> "byte 0 is a bare reason code" layout. BC and RT are generated together from a
+> single engine version, so regenerating both ends keeps them in lockstep; there
+> is no on-wire version field, and interop with a pre-v2 peer requires
+> regenerating that peer.
+
+### 9.3 BC-to-RT Fault Signal (Reset)
+
+A fault frame traveling **BC → RT** (a command-direction header with the fault
+bit cleared) is a **reset signal**. When the RT receives such a frame it
+immediately returns to its idle state and drops any in-flight payload, without
+emitting an acknowledgment. This gives the BC a way to re-synchronize the RT
+after a missed or corrupt transaction without needing a separate control channel.
+
+### 9.4 Bad Header CRC — Silent Drop
+
+A received header whose header CRC does not match is silently discarded by
+the receiver. No fault response is sent because the sub-address and priority
+fields cannot be trusted. The sender will observe a timeout.
+
+---
+
+## 10. Repeats and Idempotency
+
+Protocol T1 has no transaction ID and does not suppress repeated commands.
+Every well-formed command header received by the RT is dispatched to the
+registered handler — identical back-to-back frames produce two handler
+invocations and two responses.
+
+Applications that need idempotency or sequence tracking must encode that
+information in the payload at the application layer. This is intentional: most
+messages do not need this protection, so only the handlers that do pay the cost
+of carrying transaction IDs, and keeping that state in the handler simplifies its
+own sequence tracking.
+
+
+---
+
+## 11. Transport Interface Contract
+
+Protocol T1 operates at the **frame level**, not the byte level. The physical
+link beneath it must present a framing interface with the following semantics:
+
+### `send(bytes, length) → int32_t`
+
+Transmit one complete logical frame chunk (either a 6-byte header or a payload
+block). Returns `length` on success, `0` if the link is busy or would block,
+`-1` on a hard error. The call must be non-blocking.
+
+### `receive(out, max_length) → int32_t`
+
+Return **at most one** complete frame chunk. Returns the number of bytes copied
+on success (positive), `0` if no complete chunk is available yet, `-1` on hard
+error. The call must be non-blocking. A byte-streamed physical link (UART, USB
+CDC, etc.) requires a framing adapter underneath that re-assembles complete
+chunks based on the size declared in the preceding header.
+
+### `reset_rx()`
+
+Abort any in-progress receive and return the framer to the state of hunting for
+a fresh 6-byte header. The BC/RT calls this when abandoning a frame (timeout,
+CRC failure, transport error, or inbound fault reset signal) so that a
+partially-received payload cannot permanently desync framing from protocol
+state. `reset_rx()` does not flush the underlying byte source — any residual
+bytes in the physical-layer buffer will be realigned when the framer next
+searches for a valid header CRC.
+
+A momentary short read (data has not all arrived yet, and the per-frame deadline
+has not expired) must **not** trigger `reset_rx()` — the framer's partial
+progress must be preserved so the frame completes once the remaining bytes land.
+
+---
+
+## 12. Configuration Parameters
+
+The following parameters tune the implementation. All are compile-time
+constants in the reference implementation; a conforming implementation may
+expose them differently.
+
+| Parameter | Default | Description |
+|---|---|---|
+| `kMaxPayloadBytes` | 64 | Maximum payload size the RT will accept and buffer. Commands whose declared payload exceeds this limit are rejected with a `PayloadTooLarge` fault. Must be one of the discrete values in the payload size table (Section 4). |
+| `kFrameTimeoutMs` | 50 ms | Per-frame deadline. If a receiver has not received the expected chunk within this window the transaction is abandoned, `reset_rx()` is called, and the BC reports a timeout. |
+| `kMaxSubAddresses` | 32 | Size of the per-sub-address slot tables. Usable sub-address range is `1..(kMaxSubAddresses-1)`. The 8-bit field allows up to 255 sub-addresses; raise this constant if a deployment needs more. Memory cost scales linearly. |
+| `kBcQueueDepth` | 16 | Capacity of the BC's priority queue. `submit()` returns `QueueFull` when this depth is reached. |
+| `kInlinePayloadBytes` | 16 | Payload size at or below which the BC stores bytes in the request struct itself rather than referencing a caller-supplied buffer. Matches the small/large frame boundary. |

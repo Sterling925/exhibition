@@ -1,0 +1,48 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 10
+name: rtc
+description: RTC
+type: rtc
+service_hash: 0xF4096995
+hal_handle: &hrtc
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: SET_DATETIME
+    description: Set the RTC date and time
+    cmd_payload:
+      bytes: 7
+      fields:
+        - year_offset: uint8_t
+        - month: uint8_t
+        - day: uint8_t
+        - weekday: uint8_t
+        - hours: uint8_t
+        - minutes: uint8_t
+        - seconds: uint8_t
+    resp_payload:
+      bytes: 0
+  - opcode: 0x02
+    name: GET_DATETIME
+    description: Get the RTC date and time
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 7
+      fields:
+        - year_offset: uint8_t
+        - month: uint8_t
+        - day: uint8_t
+        - weekday: uint8_t
+        - hours: uint8_t
+        - minutes: uint8_t
+        - seconds: uint8_t

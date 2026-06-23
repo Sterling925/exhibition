@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 6
+name: gpio_out_bank_C
+description: GPIO output bank C
+type: gpio_out
+service_hash: 0x6D212AAE
+port: GPIOC
+pin_mask: 0x0001
+pins:
+  - { name: gpio_PC0, label: OTG_FS_PowerSwitchOn, pin_idx: 0 }
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: SET
+    description: Set GPIO pin (high)
+    cmd_payload:
+      bytes: 2
+      fields:
+        - opcode: uint8_t
+        - pin_idx: uint8_t
+    resp_payload:
+      bytes: 0
+  - opcode: 0x02
+    name: CLEAR
+    description: Clear GPIO pin (low)
+    cmd_payload:
+      bytes: 2
+      fields:
+        - opcode: uint8_t
+        - pin_idx: uint8_t
+    resp_payload:
+      bytes: 0

@@ -1,0 +1,86 @@
+@startuml time_sync_message_flow
+title Time Synchronization — BC <-> RT phased message flow (sub-address 1, SystemHandler)\n(NTP four-timestamp; telemetry phase + SYNC_ADJUST; min-delay ClockFilter + OffsetSmoother + smoothed SysTick governor)
+
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam shadowing false
+skinparam BoxPadding 10
+skinparam ParticipantPadding 30
+
+participant "Bus Controller\n(BC host, steady_clock)" as BC
+participant "Remote Terminal\n(RT firmware, HAL_GetTick)" as RT
+
+note over BC, RT
+  Sync runs as a repeating pair: a TELEMETRY phase of ~10-20 SYNC_PROBE/SYNC_FINAL
+  exchanges (measure only), then ONE SYNC_ADJUST that disciplines the SysTick reload.
+  PROBE/FINAL payload: [ opcode(1) | units(1) | value(4) ] = 6 bytes; ADJUST: [ opcode(1) ].
+  ""units"" is the negative power of ten of the time unit (ms = 3). LE on the wire.
+end note
+
+loop ~10-20 exchanges  (TELEMETRY phase — no reload change)
+
+  == Step 1 — SYNC_PROBE (opcode 0x06) ==
+
+  BC -> BC : T1 = clock.now_ms()
+  BC -> RT : CMD  sub=1  [ 0x06 | units | T1 (LE) ]
+  note right of RT
+    RT captures **T2 = clock.now_ms()** immediately on receipt,
+    then **T3 = clock.now_ms()** just before replying
+    (SyncState::on_probe caches units + T1, stamps T2 and T3).
+    T3 - T2 is the RT's own handling time, removed below.
+  end note
+  RT -> BC : RESP  sub=1  [ T2 | T3 (LE) ]   8-byte payload
+  BC -> BC : decode T2, T3; T4 = clock.now_ms()
+
+  == Step 2 — SYNC_FINAL (opcode 0x07) ==
+
+  BC -> RT : CMD  sub=1  [ 0x07 | units | T4 (LE) ]
+  note over RT
+    **RT collects telemetry (SystemHandler::handle):**
+    1. compute_sync_fixed(T1, T2, T3, T4):
+         path_delay = ((T4 - T1) - (T3 - T2)) / 2   (one-way, RTT/2)
+         offset     = ((T1 - T2) + (T4 - T3)) / 2   (= BC - RT, signed)
+    2. ClockFilter::push(T2, offset, path_delay); select():
+         pick the LOWEST-delay sample of the last 8 (ties -> newest) -- the
+         least jitter-contaminated exchange. A stale-output gate skips
+         re-discipline if select() re-returns an already-fed sample.
+    3. OffsetSmoother::update(selected anchor, selected offset):
+         least-squares fit offset vs local tick over a 32-sample window
+         -> intercept = disciplined offset at the anchor
+         -> slope     = skew_ppb (BC gain per local ms)
+    4. clock.set_bc_discipline(anchor, offset, skew_ppb)   (PATH A only)
+         so now_bc_ms() = now_ms + offset + skew*(now-anchor)/1e9
+    The SysTick reload is NOT changed here.
+  end note
+  RT -> BC : RESP  sub=1  16-byte fixed-point result\n[ path_delay_whole | path_delay_frac | offset_whole | offset_frac ]
+  note over BC
+    Bytes 0..7  : the SELECTED (min-delay) path delay (diagnostic)
+    Bytes 8..15 : the **disciplined** offset the RT applied (BC stores it directly)
+    The reload is NOT in this reply; it is reported only by SYNC_ADJUST.
+  end note
+
+end
+
+== Adjustment — SYNC_ADJUST (opcode 0x08), once per telemetry phase ==
+
+BC -> RT : CMD  sub=1  [ 0x08 ]
+note over RT
+  **RT applies one smoothed reload step (PATH B):**
+    avg_skew_ppb = phase_anchor.adjust_skew_ppb()   (long-baseline average;
+      falls back to the windowed clock.bc_skew_ppb() before the first baseline)
+    reload = next_tick_reload(current, nominal, avg_skew_ppb):
+      move gain (3/4) of the way to round(current*(1 - skew/1e9)),
+      clamp to +/-10% of nominal; |skew| < 6000 ppb deadband -> no-op
+    if reload changed: set_tick_reload() writes SysTick->LOAD directly
+      (VAL preserved, no time bled); the rate change is propagated back
+      into Path A (anchor dropped, smoother window rebased)
+end note
+RT -> BC : RESP  sub=1  8-byte result\n[ avg_skew_ppb (i32) | reload (u32) ]
+
+note over BC, RT
+  Repeat the pair. Each phase measures the residual skew at the new rate and the
+  next adjust steps less, so the clocks lock over several cycles. RtClient does no
+  BC-side filtering: clock_offset_units()/reload_ticks() mirror the RT exactly.
+end note
+
+@enduml

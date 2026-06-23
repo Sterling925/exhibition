@@ -1,0 +1,57 @@
+@startuml time_sync_timing
+title NTP four-timestamp Time Synchronization — generating T1..T4 (BC <-> RT, sub-address 1, SystemHandler)
+
+skinparam shadowing false
+skinparam BoxPadding 10
+skinparam ParticipantPadding 30
+
+' Two clocks on a shared wall-clock axis (ms, illustrative values).
+' T1/T4 are read off the BC clock; T2/T3 off the RT clock. The standing gap
+' between the two clocks IS the offset the exchange solves for.
+' (note top/bottom of <player> is unsupported in this PlantUML; the four
+'  timestamps are marked on the waveform states and defined in the legend.)
+robust "Bus Controller\n(BC clock)" as BC
+robust "Remote Terminal\n(RT clock)" as RT
+
+@0
+BC is Idle
+RT is Idle
+
+@10
+BC is "T1: TX probe"
+
+@30
+RT is "T2: RX probe"
+
+@45
+RT is "T3: TX reply"
+
+@65
+BC is "T4: RX reply"
+RT is Idle
+
+@80
+BC is Idle
+
+' --- connecting lines: the two propagation legs that carry the timestamps ---
+BC@10 -> RT@30 : SYNC_PROBE [T1] : T1 send -> T2 recv
+RT@45 -> BC@65 : reply [T2,T3] : T3 send -> T4 recv
+
+' --- intervals the four timestamps define ---
+highlight 30 to 45 #WhiteSmoke : RT handling (T3 - T2)
+@10 <-> @65 : round trip = T4 - T1
+
+legend bottom
+  Four timestamps captured per exchange (clock.now_ms()):
+    T1 = BC clock when SYNC_PROBE is sent
+    T2 = RT clock when the probe arrives
+    T3 = RT clock just before the [T2,T3] reply is sent  (T3 - T2 = RT handling time)
+    T4 = BC clock when that reply arrives back at the BC
+  From them the RT computes (compute_sync_fixed, sync.cpp):
+    path_delay = ((T4 - T1) - (T3 - T2)) / 2     (one-way, RTT/2)
+    offset     = ((T1 - T2) + (T4 - T3)) / 2     (BC - RT; + when BC leads)
+  Removing (T3 - T2) takes the RT's own handling time out of the round trip.
+  T4 is delivered to the RT afterward in the SYNC_FINAL command (opcode 0x07).
+endlegend
+
+@enduml

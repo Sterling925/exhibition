@@ -1,0 +1,15 @@
+[package]
+name = "exhibition"
+version = "0.16.0"
+edition = "2024"
+license = "MIT OR Apache-2.0"
+description = "Generate ready-to-build C++ PCBA test firmware (remote terminal + bus controller) from STM32CubeMX .ioc files"
+repository = "https://github.com/Sterling925/exhibition"
+readme = "README.md"
+keywords = ["stm32", "embedded", "codegen", "firmware", "testing"]
+categories = ["command-line-utilities", "embedded", "development-tools"]
+
+[dependencies]
+regex = "1"
+serde = { version = "1.0.228", features = ["derive"] }
+serde_yaml = "0.9.34"

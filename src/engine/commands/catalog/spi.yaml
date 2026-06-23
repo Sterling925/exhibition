@@ -1,0 +1,36 @@
+# Command catalog for SPI bus handlers.
+kind: spi
+cpp_enum: SpiCmd
+commands:
+  # Universal command (opcode 0x00, reserved protocol-wide): the RemoteTerminal
+  # answers this sub-address's per-service API hash framework-side.
+  - name: GET_SERVICE_HASH
+    opcode: "0x00"
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - service_hash: uint32_t
+  - name: TX
+    opcode: "0x01"
+    description: Transmit over SPI
+    cmd_payload:
+      bytes: "3+"
+      fields:
+        - len_le16: uint16_t
+        - data: uint8_t[]
+    resp_payload:
+      bytes: "0"
+  - name: RX
+    opcode: "0x02"
+    description: Receive over SPI
+    cmd_payload:
+      bytes: "2"
+      fields:
+        - length: uint16_t
+    resp_payload:
+      bytes: "N"
+      fields:
+        - data: uint8_t[]

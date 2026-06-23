@@ -1,0 +1,31 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 5
+name: gpio_in_bank_D
+description: GPIO input bank D
+type: gpio_in
+service_hash: 0x8997616C
+port: GPIOD
+pin_mask: 0x0020
+pins:
+  - { name: gpio_PD5, label: OTG_FS_OverCurrent, pin_idx: 5 }
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: READ
+    description: Read GPIO pin state
+    cmd_payload:
+      bytes: 2
+      fields:
+        - opcode: uint8_t
+        - pin_idx: uint8_t
+    resp_payload:
+      bytes: 1 (padded to 2)

@@ -1,0 +1,72 @@
+@startuml time_sync_sequence
+title NTP four-timestamp Time Synchronization — BC <-> RT (sub-address 1, SystemHandler)
+
+skinparam sequenceMessageAlign center
+skinparam responseMessageBelowArrow true
+skinparam BoxPadding 10
+skinparam ParticipantPadding 30
+
+participant "Bus Controller\n(BC host)" as BC
+participant "Remote Terminal\n(RT firmware)" as RT
+
+note over BC, RT
+  Two commands target **sub-address 1** (SystemHandler).
+  Command payload format: [ opcode(1) | units(1) | value(4) ] = 6 bytes.
+  ""units"" is the negative power of ten of the time unit (ms = 3).
+  All values are little-endian on the wire.
+end note
+
+== Step 1 — SYNC_PROBE (opcode 0x06) ==
+
+BC -> BC : T1 = clock.now_ms()
+BC -> RT : CMD  sub=1  [ 0x06 | units | T1 (LE) ]\n6-byte command payload
+note right of RT
+  RT captures **T2** = clock.now_ms() on receipt,
+  then **T3** = clock.now_ms() just before replying
+  (T3 - T2 is the RT's own handling time)
+end note
+RT -> BC : RESP  sub=1  [ T2 | T3 (LE) ]\n8-byte response payload
+BC -> BC : decode T2, T3 from response\nT4 = clock.now_ms()
+
+== Step 2 — SYNC_FINAL (opcode 0x07) ==
+
+note over BC
+  BC sends T4 so the RT can complete
+  all four timestamps on its side.
+end note
+BC -> RT : CMD  sub=1  [ 0x07 | units | T4 (LE) ]\n6-byte command payload
+
+note over RT
+  RT computes via compute_sync_fixed(T1, T2, T3, T4):
+  path_delay = ((T4 - T1) - (T3 - T2)) / 2   (one-way, RTT/2)
+  offset     = ((T1 - T2) + (T4 - T3)) / 2
+  (offset is BC - RT; positive when BC clock leads)
+
+  **RT-side discipline:**
+  push (offset, path_delay) into the 8-deep min-delay
+  ClockFilter; the lowest-delay sample of the recent
+  window feeds the least-squares OffsetSmoother, which
+  recovers the disciplined offset and the clock skew.
+  Serializes the SELECTED (min-delay) path delay and the
+  disciplined offset as four LE words (16 bytes).
+end note
+
+RT -> BC : RESP  sub=1  16-byte fixed-point result\n[ path_delay_whole | path_delay_frac | offset_whole | offset_frac ]
+
+note over BC
+  **Fixed-point encoding (per word)**
+  ""path_delay_whole"" — uint32, whole units (>= 0)
+  ""path_delay_frac""  — uint32, thousandths of a unit (0..999)
+  ""offset_whole""     — int32,  whole units (signed, BC - RT)
+  ""offset_frac""      — int32,  thousandths (-999..999, sign matches whole)
+  e.g. -1.5 ms encodes as { whole=-1, frac=-500 }
+
+  Offset bytes (8..15) carry the **disciplined** value the RT
+  already applied to its clock — BC stores it directly,
+  no further filtering needed.
+
+  Getters available after at least one successful exchange:
+  ""has_sync()"" / ""clock_offset_units()"" / ""path_delay_units()"" / ""sync_units()""
+end note
+
+@enduml

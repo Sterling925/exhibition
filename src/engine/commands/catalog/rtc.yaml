@@ -1,0 +1,45 @@
+# Command catalog for RTC (Real-Time Clock) handlers.
+kind: rtc
+cpp_enum: RtcCmd
+commands:
+  # Universal command (opcode 0x00, reserved protocol-wide): the RemoteTerminal
+  # answers this sub-address's per-service API hash framework-side.
+  - name: GET_SERVICE_HASH
+    opcode: "0x00"
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - service_hash: uint32_t
+  - name: SET_DATETIME
+    opcode: "0x01"
+    description: Set the RTC date and time
+    cmd_payload:
+      bytes: "7"
+      fields:
+        - year_offset: uint8_t
+        - month: uint8_t
+        - day: uint8_t
+        - weekday: uint8_t
+        - hours: uint8_t
+        - minutes: uint8_t
+        - seconds: uint8_t
+    resp_payload:
+      bytes: "0"
+  - name: GET_DATETIME
+    opcode: "0x02"
+    description: Get the RTC date and time
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "7"
+      fields:
+        - year_offset: uint8_t
+        - month: uint8_t
+        - day: uint8_t
+        - weekday: uint8_t
+        - hours: uint8_t
+        - minutes: uint8_t
+        - seconds: uint8_t

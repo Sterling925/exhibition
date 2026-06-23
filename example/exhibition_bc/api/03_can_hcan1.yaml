@@ -1,0 +1,36 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 3
+name: can_hcan1
+description: CAN1
+type: can
+service_hash: 0x1AD19012
+hal_handle: &hcan1
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: TX_FRAME
+    description: Transmit a CAN frame
+    cmd_payload:
+      bytes: 6+
+      fields:
+        - id_be32: uint32_t
+        - dlc: uint8_t
+        - data: uint8_t[]
+    resp_payload:
+      bytes: 0
+  - opcode: 0x02
+    name: RX_FRAME
+    description: Receive a CAN frame
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 13 (padded to 14)

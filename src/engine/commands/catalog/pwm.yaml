@@ -1,0 +1,24 @@
+# Command catalog for PWM channel handlers.
+kind: pwm
+cpp_enum: PwmCmd
+commands:
+  # Universal command (opcode 0x00, reserved protocol-wide): the RemoteTerminal
+  # answers this sub-address's per-service API hash framework-side.
+  - name: GET_SERVICE_HASH
+    opcode: "0x00"
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - service_hash: uint32_t
+  - name: SET_DUTY
+    opcode: "0x01"
+    description: Set the PWM duty cycle
+    cmd_payload:
+      bytes: "2"
+      fields:
+        - duty_x100: uint16_t
+    resp_payload:
+      bytes: "0"

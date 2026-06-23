@@ -1,0 +1,78 @@
+# Command catalog for QUADSPI (Quad SPI) flash handlers.
+#
+# Each command carries the flash instruction byte as a parameter so the same
+# handler works across flash vendors. The instruction and (optional) address
+# phases are issued on a single line; the data phase line width is selectable
+# (1/2/4) so reads and programs can use quad I/O. Addresses are 24-bit.
+kind: qspi
+cpp_enum: QspiCmd
+commands:
+  # Universal command (opcode 0x00, reserved protocol-wide): the RemoteTerminal
+  # answers this sub-address's per-service API hash framework-side.
+  - name: GET_SERVICE_HASH
+    opcode: "0x00"
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - service_hash: uint32_t
+  - name: READ
+    opcode: "0x01"
+    description: Read flash data
+    cmd_payload:
+      bytes: "9"
+      fields:
+        - instr: uint8_t
+        - addr_be24: uint8_t[3]
+        - dummy_cycles: uint8_t
+        - data_lines: uint8_t
+        - len_le16: uint16_t
+    resp_payload:
+      bytes: "N"
+      fields:
+        - data: uint8_t[]
+  - name: PROGRAM
+    opcode: "0x02"
+    description: Program (write) flash data
+    cmd_payload:
+      bytes: "8+"
+      fields:
+        - instr: uint8_t
+        - addr_be24: uint8_t[3]
+        - data_lines: uint8_t
+        - len_le16: uint16_t
+        - data: uint8_t[]
+    resp_payload:
+      bytes: "0"
+  - name: ERASE
+    opcode: "0x03"
+    description: Erase a flash sector
+    cmd_payload:
+      bytes: "5"
+      fields:
+        - instr: uint8_t
+        - addr_be24: uint8_t[3]
+    resp_payload:
+      bytes: "0"
+  - name: READ_STATUS
+    opcode: "0x04"
+    description: Read the flash status register
+    cmd_payload:
+      bytes: "2"
+      fields:
+        - instr: uint8_t
+    resp_payload:
+      bytes: "1"
+      fields:
+        - status: uint8_t
+  - name: WRITE_ENABLE
+    opcode: "0x05"
+    description: Send write-enable to the flash
+    cmd_payload:
+      bytes: "2"
+      fields:
+        - instr: uint8_t
+    resp_payload:
+      bytes: "0"

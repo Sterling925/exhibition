@@ -1,0 +1,33 @@
+# Command catalog for CAN bus handlers.
+kind: can
+cpp_enum: CanCmd
+commands:
+  # Universal command (opcode 0x00, reserved protocol-wide): the RemoteTerminal
+  # answers this sub-address's per-service API hash framework-side.
+  - name: GET_SERVICE_HASH
+    opcode: "0x00"
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - service_hash: uint32_t
+  - name: TX_FRAME
+    opcode: "0x01"
+    description: Transmit a CAN frame
+    cmd_payload:
+      bytes: "6+"
+      fields:
+        - id_be32: uint32_t
+        - dlc: uint8_t
+        - data: uint8_t[]
+    resp_payload:
+      bytes: "0"
+  - name: RX_FRAME
+    opcode: "0x02"
+    description: Receive a CAN frame
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "13 (padded to 14)"

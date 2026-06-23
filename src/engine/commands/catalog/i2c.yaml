@@ -1,0 +1,38 @@
+# Command catalog for I2C bus handlers.
+kind: i2c
+cpp_enum: I2cCmd
+commands:
+  # Universal command (opcode 0x00, reserved protocol-wide): the RemoteTerminal
+  # answers this sub-address's per-service API hash framework-side.
+  - name: GET_SERVICE_HASH
+    opcode: "0x00"
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - service_hash: uint32_t
+  - name: WRITE_REG
+    opcode: "0x01"
+    description: Write an I2C device register
+    cmd_payload:
+      bytes: "4+"
+      fields:
+        - addr7: uint8_t
+        - reg8: uint8_t
+        - len8: uint8_t
+        - data: uint8_t[]
+    resp_payload:
+      bytes: "0"
+  - name: READ_REG
+    opcode: "0x02"
+    description: Read an I2C device register
+    cmd_payload:
+      bytes: "3"
+      fields:
+        - addr7: uint8_t
+        - reg8: uint8_t
+        - len8: uint8_t
+    resp_payload:
+      bytes: "len"

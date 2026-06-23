@@ -1,0 +1,30 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 2
+name: adc_hadc1_ch1
+description: MyAdc
+type: adc
+service_hash: 0x051B7A24
+hal_handle: &hadc1
+channel: 1
+pin_id: PA1
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: SAMPLE
+    description: Sample the ADC channel
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 6
+      fields:
+        - counts: uint16_t
+        - bc_timestamp: uint32_t

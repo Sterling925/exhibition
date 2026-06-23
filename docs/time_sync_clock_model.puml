@@ -1,0 +1,187 @@
+@startuml time_sync_clock_model
+title Time-sync clock model — RT side (who computes, stores, and applies the correction)
+
+skinparam classAttributeIconSize 0
+skinparam packageStyle rectangle
+skinparam shadowing false
+skinparam class {
+    BackgroundColor White
+    BorderColor Black
+    ArrowColor Black
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Plain-data results
+' ─────────────────────────────────────────────────────────────────────────────
+package "fixed-point results" {
+
+    class SyncFixed <<struct>> {
+        +uint32_t path_delay_whole
+        +uint32_t path_delay_frac
+        +int32_t offset_whole
+        +int32_t offset_frac
+    }
+
+    class Discipline <<struct>> {
+        +uint32_t anchor_ms
+        +int32_t offset_whole
+        +int32_t offset_frac
+        +int32_t skew_ppb
+    }
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Free functions (sync.cpp) — pure, HAL-free, host-unit-tested
+' ─────────────────────────────────────────────────────────────────────────────
+package "sync.cpp free functions" {
+
+    class SyncMath <<utility>> {
+        +compute_sync_fixed(t1, t2, t3, t4) : SyncFixed
+        +apply_bc_offset(local, off_w, off_f) : uint32_t
+        +apply_bc_discipline(local, anchor, off_w, off_f, skew) : uint32_t
+        +next_tick_reload(current, nominal, skew_ppb) : uint32_t
+        +offset_split_signed(value, w_out, f_out) : void
+        +offset_pack_micro(w, f) : int32_t
+        +offset_unpack_micro(micro, w_out, f_out) : void
+    }
+    note bottom of SyncMath
+      NTP four-timestamp form (T3 = RT response-send instant):
+        offset     = ((t1-t2) + (t4-t3))/2   (BC - RT)
+        path_delay = ((t4-t1) - (t3-t2))/2   (one-way, RTT/2)
+      apply_bc_discipline = local + offset + skew*(local-anchor)/1e9
+      next_tick_reload: smoothed partial step (gain 3/4) toward the
+      skew-cancelling reload; skew>0 (RT slow) -> DECREASE; clamp +/-10%
+    end note
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Per-exchange state + estimator
+' ─────────────────────────────────────────────────────────────────────────────
+class SyncState {
+    -uint8_t m_units
+    -uint32_t m_t1
+    -uint32_t m_t2
+    -uint32_t m_t3
+    +on_probe(units, t1, rx_now, tx_now, resp) : uint32_t
+    +on_final(t4, resp, result_out) : uint32_t
+    +t2() : uint32_t
+    +t3() : uint32_t
+}
+
+class OffsetSmoother {
+    -uint32_t m_tick[32]
+    -double m_offset[32]
+    -uint32_t m_count
+    +update(local_tick_t2, meas_w, meas_f, out) : void
+}
+note right of OffsetSmoother
+  Least-squares fit offset vs local tick:
+  slope -> skew_ppb, intercept -> offset.
+  Window kWindow = 32 (~1 min at 0.5 Hz).
+  < 4 samples or span < 5 s: skew = 0.
+end note
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Min-delay clock filter (NTP-style sample selection)
+' ─────────────────────────────────────────────────────────────────────────────
+class ClockFilter {
+    -Entry m_slot[8]
+    -uint32_t m_count
+    -uint32_t m_head
+    -uint32_t m_next_seq
+    +push(abscissa_ms, off_w, off_f, delay_w, delay_f) : void
+    +select(out : Selected&) : bool
+    +count() : uint32_t
+    +reset() : void
+}
+note right of ClockFilter
+  NTP eight-stage min-delay clock filter (kStages = 8).
+  push() rings each (offset, path_delay) sample;
+  select() returns the LOWEST-delay one (ties -> newest seq),
+  the least jitter-contaminated of the recent window.
+  Selects only -- the OffsetSmoother does the fitting.
+end note
+
+class Selected <<struct>> {
+    +uint32_t abscissa_ms
+    +int32_t offset_whole
+    +int32_t offset_frac
+    +uint32_t delay_whole
+    +uint32_t delay_frac
+}
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Clock seam
+' ─────────────────────────────────────────────────────────────────────────────
+interface IClock {
+    +now_ms() : uint32_t
+    +now_bc_ms() : uint32_t
+    +set_bc_discipline(anchor, off_w, off_f, skew) : void
+    +tick_reload() : uint32_t
+    +nominal_tick_reload() : uint32_t
+    +set_tick_reload(ticks) : void
+    +bc_skew_ppb() : int32_t
+    +has_sync() : bool
+}
+
+class SysTickClock {
+    -int32_t m_bc_offset_whole
+    -int32_t m_bc_offset_fractional
+    -uint32_t m_bc_anchor_ms
+    -int32_t m_bc_skew_ppb
+    -uint32_t m_tick_reload
+    -bool m_has_sync
+    +now_ms() : uint32_t
+    +now_bc_ms() : uint32_t
+    +set_bc_discipline(...) : void
+    +set_tick_reload(ticks) : void
+}
+note right of SysTickClock
+  now_ms()  = HAL_GetTick()  (the RAW systick)
+  now_bc_ms() = apply_bc_discipline(now_ms, ...)
+  set_tick_reload() writes SysTick->LOAD directly:
+    physically retunes the rate of now_ms()
+    while VAL keeps counting (no ms discarded)
+end note
+
+' ─────────────────────────────────────────────────────────────────────────────
+' Orchestrator
+' ─────────────────────────────────────────────────────────────────────────────
+class SystemHandler {
+    -IClock& m_clock
+    -OffsetSmoother& m_smoother
+    -PhaseAnchor m_phase_anchor
+    -SyncState m_sync
+    -ClockFilter m_filter
+    -uint32_t m_last_filter_epoch
+    +handle(...) : Status
+}
+note bottom of SystemHandler
+  SYNC_FINAL  -> telemetry: compute_sync_fixed -> filter.push/select
+    (min-delay) -> stale-output gate -> smoother.update
+    + PATH A (set_bc_discipline)
+  SYNC_ADJUST -> PATH B: next_tick_reload + set_tick_reload (once per
+    phase); skew from the long-baseline PhaseAnchor
+end note
+
+SysTickClock ..|> IClock
+SystemHandler *-- SyncState : owns
+SystemHandler *-- ClockFilter : owns
+SystemHandler --> IClock : uses (inject)
+SystemHandler --> OffsetSmoother : uses (inject)
+SyncState ..> SyncFixed : produces
+OffsetSmoother ..> Discipline : produces
+ClockFilter ..> Selected : produces
+ClockFilter ..> SyncMath : offset_pack / offset_unpack_micro
+SystemHandler ..> SyncMath : compute_sync_fixed / next_tick_reload
+SysTickClock ..> SyncMath : now_bc_ms -> apply_bc_discipline
+
+legend right
+  Phased discipline (both derive from skew_ppb):
+  A) SOFTWARE — set_bc_discipline -> now_bc_ms() only; runs every SYNC_FINAL
+     (telemetry). Read-only, no feedback.
+  B) HARDWARE — next_tick_reload -> set_tick_reload mutates now_ms(); runs once
+     per phase (SYNC_ADJUST), a smoothed partial step. See time_sync_design.md.
+endlegend
+
+@enduml

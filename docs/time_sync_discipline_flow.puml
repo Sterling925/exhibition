@@ -1,0 +1,81 @@
+@startuml time_sync_discipline_flow
+title RT clock discipline — phased telemetry / adjust (SystemHandler::handle)
+
+skinparam shadowing false
+skinparam activity {
+    BackgroundColor White
+    BorderColor Black
+    ArrowColor Black
+    DiamondBackgroundColor White
+    DiamondBorderColor Black
+}
+
+start
+
+partition "TELEMETRY phase — SYNC_FINAL, repeated ~10-20x (no reload change)" {
+  :SYNC_FINAL arrives, T4 = payload value;
+  note right
+    Sync is a repeating pair: a TELEMETRY phase of ~10-20 SYNC_PROBE/
+    SYNC_FINAL exchanges that only MEASURE (and keep now_bc_ms disciplined),
+    then ONE SYNC_ADJUST that applies a smoothed, bounded reload step.
+    Repeat the pair; the clocks lock over several cycles (each step is partial).
+  end note
+  :SyncState::on_final -> compute_sync_fixed(T1, T2, T3, T4)\noffset = ((T1 - T2) + (T4 - T3))/2   (BC - RT)\npath_delay = ((T4 - T1) - (T3 - T2))/2   (one-way, RTT/2);
+  :ClockFilter::push(T2, offset, path_delay); select()\n-> LOWEST-delay sample of the last 8 (ties -> newest);
+  note right
+    NTP min-delay clock filter: the least
+    jitter-contaminated of the recent window
+    is disciplined from -- not the raw newest.
+  end note
+  if (selected sample already fed?\n(stale-output gate)) then (yes)
+    :hold the prior discipline\n(skip the smoother / anchor feed);
+  else (no -- fresh epoch)
+    :OffsetSmoother::update(anchor = selected T2, selected offset);
+    if (count >= 4  AND  span >= 5 s  AND  |slope|*span >= 1.5 ms ?) then (yes -- locked)
+      :least-squares fit over 32-sample window\nintercept -> disciplined offset @ anchor\nslope     -> skew_ppb (BC gain per local ms);
+    else (no -- cold start / SNR-gated)
+      :disciplined offset = selected offset\nskew_ppb = 0;
+    endif
+    :PATH A (software): clock.set_bc_discipline(anchor, offset, skew_ppb)\nphase_anchor.note_measurement(anchor, offset);
+    note right
+      now_bc_ms() = now_ms + offset
+      + skew_ppb*(now_ms - anchor)/1e9.
+      Read-only; never feeds back into the
+      measured offset. SysTick is NOT touched.
+    end note
+  endif
+  :reply 16 bytes\n[ selected (min-delay) path_delay | disciplined offset ]\n(no reload word -- that is SYNC_ADJUST only);
+}
+
+partition "ADJUST — one SYNC_ADJUST per phase applies the averaged skew (PATH B)" {
+  :read avg_skew_ppb = phase_anchor.adjust_skew_ppb()\n(long-baseline average; falls back to the windowed\nclock.bc_skew_ppb() before the first baseline exists);
+  if (|avg_skew_ppb| < 6000 ppb deadband ?) then (yes)
+    :keep current reload (no-op);
+  else (no)
+    :ideal = round(current * (1 - avg_skew_ppb/1e9))\nskew>0 (RT slow) -> shorter reload -> RT faster\nskew<0 (RT fast) -> longer reload  -> RT slower;
+    :SMOOTH: step = gain (kReloadGainNum/kReloadGainDen, 3/4)\n* (ideal - current)   -- a partial step, not the whole gap;
+    :clamp to +/- 10% of nominal;
+  endif
+  if (reload != current reload ?) then (changed)
+    :PATH B (hardware): set_tick_reload(reload)\nwrites SysTick->LOAD = reload-1 directly\n(VAL keeps counting -- no ms discarded);
+    :propagate the rate change into Path A:\ndrop the anchor baseline, rebase the smoother window,\nre-store discipline with the post-step residual skew;
+    note right
+      Direct LOAD write preserves the in-flight
+      millisecond, so a reload step costs no time
+      (the old HAL_SYSTICK_Config VAL=0 bleed is gone).
+    end note
+  else (unchanged)
+    :leave SysTick untouched;
+  endif
+  :reply 8 bytes\n[ avg_skew_ppb | reload ];
+  note right
+    Loop back to the next TELEMETRY phase. As the reload nears the BC
+    rate the next phase measures a smaller residual skew, so each adjust
+    steps less, until the skew sits inside the deadband and the reload
+    settles within +/-10% of nominal.
+  end note
+}
+
+stop
+
+@enduml

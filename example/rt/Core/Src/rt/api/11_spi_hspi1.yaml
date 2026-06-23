@@ -1,0 +1,39 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 11
+name: spi_hspi1
+description: SPI1
+type: spi
+service_hash: 0xEF71E046
+hal_handle: &hspi1
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: TX
+    description: Transmit over SPI
+    cmd_payload:
+      bytes: 3+
+      fields:
+        - len_le16: uint16_t
+        - data: uint8_t[]
+    resp_payload:
+      bytes: 0
+  - opcode: 0x02
+    name: RX
+    description: Receive over SPI
+    cmd_payload:
+      bytes: 2
+      fields:
+        - length: uint16_t
+    resp_payload:
+      bytes: N
+      fields:
+        - data: uint8_t[]

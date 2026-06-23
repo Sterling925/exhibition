@@ -1,0 +1,25 @@
+# Command catalog for GPIO input bank handlers.
+kind: gpio_in
+cpp_enum: GpioInputCmd
+commands:
+  # Universal command (opcode 0x00, reserved protocol-wide): the RemoteTerminal
+  # answers this sub-address's per-service API hash framework-side.
+  - name: GET_SERVICE_HASH
+    opcode: "0x00"
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: "0"
+    resp_payload:
+      bytes: "4"
+      fields:
+        - service_hash: uint32_t
+  - name: READ
+    opcode: "0x01"
+    description: Read GPIO pin state
+    cmd_payload:
+      bytes: "2"
+      fields:
+        - opcode: uint8_t
+        - pin_idx: uint8_t
+    resp_payload:
+      bytes: "1 (padded to 2)"

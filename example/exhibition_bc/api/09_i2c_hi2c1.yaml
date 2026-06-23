@@ -1,0 +1,41 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+sub_address: 9
+name: i2c_hi2c1
+description: I2C1
+type: i2c
+service_hash: 0xC6B66801
+hal_handle: &hi2c1
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: WRITE_REG
+    description: Write an I2C device register
+    cmd_payload:
+      bytes: 4+
+      fields:
+        - addr7: uint8_t
+        - reg8: uint8_t
+        - len8: uint8_t
+        - data: uint8_t[]
+    resp_payload:
+      bytes: 0
+  - opcode: 0x02
+    name: READ_REG
+    description: Read an I2C device register
+    cmd_payload:
+      bytes: 3
+      fields:
+        - addr7: uint8_t
+        - reg8: uint8_t
+        - len8: uint8_t
+    resp_payload:
+      bytes: len

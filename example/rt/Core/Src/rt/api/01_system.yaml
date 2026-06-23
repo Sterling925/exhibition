@@ -1,0 +1,140 @@
+# SPDX-License-Identifier: MIT OR Apache-2.0
+# SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
+version: 1
+fingerprint: 0xA084EED3
+sub_address: 1
+name: system
+description: System handler (API fingerprint, device count)
+type: system
+service_hash: 0xD695D532
+commands:
+  - opcode: 0x00
+    name: GET_SERVICE_HASH
+    description: Get the per-service API hash
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - service_hash: uint32_t
+  - opcode: 0x01
+    name: GET_FINGERPRINT
+    description: Get the API fingerprint
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - fingerprint: uint32_t
+  - opcode: 0x02
+    name: GET_DEVICE_COUNT
+    description: Get the attached device count
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 2
+      fields:
+        - count: uint16_t
+  - opcode: 0x03
+    name: GET_SYS_TICK
+    description: Get the system tick count
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - systick: uint32_t
+  - opcode: 0x04
+    name: GET_CORE_DEVICE_ID
+    description: Get the core device identifier
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 8
+      fields:
+        - devid: uint32_t
+        - revid: uint32_t
+  - opcode: 0x05
+    name: GET_CPU_ID
+    description: Get the unique CPU ID
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 12
+      fields:
+        - uid0: uint32_t
+        - uid1: uint32_t
+        - uid2: uint32_t
+  - opcode: 0x06
+    name: SYNC_PROBE
+    description: Time-sync round-trip probe
+    cmd_payload:
+      bytes: 6
+      fields:
+        - opcode: uint8_t
+        - units: uint8_t
+        - t1: uint32_t
+    resp_payload:
+      bytes: 8
+      fields:
+        - t2: uint32_t
+        - t3: uint32_t
+  - opcode: 0x07
+    name: SYNC_FINAL
+    description: Apply final time-sync offset
+    cmd_payload:
+      bytes: 6
+      fields:
+        - opcode: uint8_t
+        - units: uint8_t
+        - t4: uint32_t
+    resp_payload:
+      bytes: 16
+      fields:
+        - path_delay_whole: uint32_t
+        - path_delay_frac: uint32_t
+        - offset_whole: int32_t
+        - offset_frac: int32_t
+  - opcode: 0x08
+    name: SYNC_ADJUST
+    description: Apply incremental clock adjustment
+    cmd_payload:
+      bytes: 1
+      fields:
+        - opcode: uint8_t
+    resp_payload:
+      bytes: 8
+      fields:
+        - skew_ppb: int32_t
+        - systick_reload: uint32_t
+  - opcode: 0x09
+    name: GET_MESSAGE_FAULT_COUNTER
+    description: Get the message fault counter
+    cmd_payload:
+      bytes: 0
+    resp_payload:
+      bytes: 4
+      fields:
+        - fault_counter: uint32_t
+  - opcode: 0x0A
+    name: SOFT_RESET
+    description: Trigger a soft reset
+    cmd_payload:
+      bytes: 1
+      fields:
+        - opcode: uint8_t
+    resp_payload:
+      bytes: 0
+  - opcode: 0x0B
+    name: READ_MEMORY
+    description: Read an arbitrary region of memory
+    cmd_payload:
+      bytes: 7
+      fields:
+        - opcode: uint8_t
+        - address: uint32_t
+        - length: uint16_t
+    resp_payload:
+      bytes: len
+      fields:
+        - data: uint8_t[]

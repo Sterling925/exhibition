@@ -1,0 +1,5 @@
+# Cargo defaults the build output to ./target (gitignored).
+# To redirect builds elsewhere (e.g. a ramdisk to keep the tree clean and
+# speed up rebuilds), export CARGO_TARGET_DIR -- it overrides this config:
+#   export CARGO_TARGET_DIR=/media/ramdisk/exhibition
+
