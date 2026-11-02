@@ -1,6 +1,6 @@
 # Frame transport: traffic flow, faults, and recovery
 
-These sequence diagrams illustrate how the Protocol T1 byte-stream framing
+These sequence diagrams illustrate how the Protocol T2 byte-stream framing
 transports (`SerialFrameTransport`, `UartFrameTransport`, `UsbCdcFrameTransport`
 — identical framing logic) reassemble frames, and how a partially-received
 payload is recovered.
@@ -9,7 +9,9 @@ payload is recovered.
 
 Each receive framer is a two-state machine: `Header` (collect 6 bytes, validate the header
 CRC, with a sliding-window resync on a bad CRC) → `Payload` (collect the declared `N` bytes,
-then return to `Header`). State persists across `receive()` calls.
+then return to `Header`). State persists across `receive()` calls. A header declaring size 0
+or size 2 (whose 2-byte payload is inline in the header) has no payload chunk, so the framer
+stays in `Header`.
 
 The transport has **no timeout of its own**. The `BusController` / `RemoteTerminal` owns the
 per-frame deadline, and when it abandons a frame (timeout, transport error, CRC failure, or an

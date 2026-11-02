@@ -33,7 +33,7 @@ settle is the **skew** (the ramp's *slope*) and the **residual**. See
 | Role | Host; **initiates** every transaction | STM32F407 firmware; **responds** |
 | Code | [`example/bc/`](../example/bc/) | [`example/rt/`](../example/rt/) |
 | Clock | `std::chrono::steady_clock` | `HAL_GetTick()` (1 kHz SysTick) |
-| Transport | Protocol T1 over UART / USB-CDC, half-duplex | same |
+| Transport | Protocol T2 over UART / USB-CDC, half-duplex | same |
 
 Time-sync uses **sub-address 1**, the `SystemHandler`
 ([`system_handler.cpp`](../example/rt/Core/Src/rt/system/system_handler.cpp)). The BC
@@ -58,13 +58,23 @@ NTP four-timestamp offset/delay over a single round trip. Four timestamps:
 | | Captured by | When |
 |---|---|---|
 | **T1** | BC | sending `SYNC_PROBE` |
-| **T2** | RT | receiving `SYNC_PROBE` (a raw `HAL_GetTick()` value) |
+| **T2** | RT | the `SYNC_PROBE` command header arrives (a raw `HAL_GetTick()` value) |
 | **T3** | RT | just before sending the `SYNC_PROBE` response (a raw `HAL_GetTick()` value) |
 | **T4** | BC | the `SYNC_PROBE` response arrives back at the BC |
 
 Capturing both RT-side instants (T2 receive, T3 send) lets the RT's own handler
 processing time, `T3 - T2`, be subtracted out per sample instead of assumed zero as in
 the old Cristian three-timestamp scheme.
+
+T2 is the arrival of the command **header**, recorded by the `RemoteTerminal`
+(`cmd_header_rx_ms()`) and read by the system handler. `SYNC_PROBE` is a 6-byte command,
+so after its header the RT acks and waits for the payload before the handler runs.
+Stamping at the header keeps that ack round trip (including the BC host's turnaround)
+out of the forward path, which would otherwise be three legs long against a one-leg
+return and bias the offset. The ack/payload interval lands in `T3 - T2` instead, where
+the four-timestamp formula subtracts it. What asymmetry remains is the return path's
+response payload (8 bytes, sent on the RT tick after its header) and the T1 stamp
+being taken just before the request is queued.
 
 The same exchange viewed on a time axis — where each of T1–T4 is captured, the two
 propagation legs, the RT handling interval (`T3 − T2`), and the round trip (`T4 − T1`):
@@ -76,7 +86,7 @@ propagation legs, the RT handling interval (`T3 − T2`), and the round trip (`T
 Two **telemetry** commands, each a `[opcode(1) | units(1) | value(4 LE)]` 6-byte payload,
 plus a one-byte **adjustment** command:
 
-1. **`SYNC_PROBE` (0x06)** — `value = T1`. RT caches T1, stamps **T2** on receipt and
+1. **`SYNC_PROBE` (0x06)** — `value = T1`. RT caches T1, stamps **T2** at header arrival and
    **T3** just before replying, and returns both (**8 bytes**). BC records **T4** when the
    reply lands.
    ([`system_handler.cpp:99`](../example/rt/Core/Src/rt/system/system_handler.cpp#L99),

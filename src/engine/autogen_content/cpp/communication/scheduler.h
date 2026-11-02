@@ -257,6 +257,11 @@ class BusController {
     /// @brief Reset a slot to Idle and fire its completion callback.
     void complete_slot(uint8_t sub_addr, Status status);
 
+    /// @brief Finish a slot whose response header declared size 2: copy the
+    ///        inline payload (header bytes 2-3) into the response buffer, then
+    ///        complete Ok, or fail RemoteFault if the fault bit was latched.
+    void complete_inline_resp(uint8_t sub_addr);
+
     /// @brief Handle a failed transaction. Timeout / CRC / malformed failures
     ///        are counted and, if the slot has not retried yet, re-sent once
     ///        starting from the command header. Otherwise (non-retryable
@@ -315,6 +320,11 @@ class RemoteTerminal {
     /// @brief Advance the RT state machine by one step.
     void tick();
 
+    /// @brief Clock time (IClock::now_ms) at which the most recent valid
+    ///        header arrived. While a handler runs this is the arrival of the
+    ///        command being handled; time sync uses it as the receive stamp.
+    uint32_t cmd_header_rx_ms() const { return m_cmd_rx_ms; }
+
     private:
 
     enum class RtState : uint8_t {
@@ -341,6 +351,13 @@ class RemoteTerminal {
     /// @return true on full success, false on transport error.
     bool send_fault(uint8_t sub_addr, MessagePriorities prio, Status code);
 
+    /// @brief Run a fully received command (in m_cmd_payload, described by
+    ///        m_active_cmd_header) and send its response: the universal
+    ///        GET_SERVICE_HASH check, the handler, App-tag fault prepending,
+    ///        padding, then the ack / inline response / response header.
+    /// @param now Tick time, used for the TxRespPayload deadline.
+    void dispatch_command(uint32_t now);
+
     /// @brief Abandon the in-flight inbound frame: return to Idle and resync
     ///        the transport framer (reset_rx) so a stuck partial payload cannot
     ///        desync framing from protocol state.
@@ -358,6 +375,7 @@ class RemoteTerminal {
     RtState       m_state;
     MessageHeader m_active_cmd_header;
     uint32_t      m_deadline_ms;
+    uint32_t      m_cmd_rx_ms;    ///< Arrival time of the current command header.
     uint8_t       m_cmd_payload[kMaxPayloadBytes];
     uint8_t       m_resp_payload[kMaxPayloadBytes];
     uint32_t      m_resp_len;

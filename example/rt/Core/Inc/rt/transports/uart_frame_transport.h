@@ -8,7 +8,7 @@
 
 #include "main.h"
 #include "rt/communication/i_frame_transport.h"
-#include "../communication/scheduler.h"
+#include "rt/communication/scheduler.h"
 
 
 /// @brief Polling-based IFrameTransport over a HAL UART.

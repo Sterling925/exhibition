@@ -7,7 +7,7 @@
 #include <stdint.h>
 
 
-/// @brief Abstract half-duplex frame transport injected into the Protocol T1
+/// @brief Abstract half-duplex frame transport injected into the Protocol T2
 ///        scheduler.
 /// @details
 /// A "frame" here is one logical wire chunk -- either a 6-byte serialized

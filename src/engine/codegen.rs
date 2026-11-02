@@ -378,6 +378,10 @@ fn rewrite_includes_for_rt(contents: &str) -> String {
          "#include \"rt/communication/phase_anchor.h\""),
         ("#include \"../communication/fault_counter.h\"",
          "#include \"rt/communication/fault_counter.h\""),
+        ("#include \"../communication/scheduler.h\"",
+         "#include \"rt/communication/scheduler.h\""),
+        ("#include \"../communication/clock_filter.h\"",
+         "#include \"rt/communication/clock_filter.h\""),
 
         // Two-up traversal from devices/<area>/.
         ("#include \"../../communication/i_sub_address_handler.h\"",
@@ -567,6 +571,9 @@ fn render_registry_source(slots: &[DeviceSlot], transport: &TransportChoice) -> 
     s.push_str("    // SysTick reload: the file-scope clock ctor ran pre-PLL (16 MHz default).\n");
     s.push_str("    SystemCoreClockUpdate();\n");
     s.push_str("    g_clock.sync_from_core_clock();\n");
+    // Time sync stamps T2 at the command header's arrival (before the ack and
+    // payload legs), which the RemoteTerminal records.
+    s.push_str("    g_system_handler.set_rx_time_source(&g_rt);\n");
     s.push_str(&format!(
         "    g_rt.register_handler(static_cast<uint8_t>(SubAddress::System), \
          &g_system_handler, {});\n",

@@ -260,6 +260,8 @@ in `main.cpp` is preserved. The `user/` helper modules are never touched.
 - **Integrate with your own board:** Point Exhibition at your own `.ioc` file.
   See the root [README.md](../README.md) for the full usage reference.
 - **Add your test sequences:** Edit the `USER CODE` regions in `bc/main.cpp`.
-- **Wire protocol details:** See [docs/protocol_t1.md](../docs/protocol_t1.md).
+- **Wire protocol details:** See [docs/protocol_t2.md](../docs/protocol_t2.md) (the
+  protocol the generated code speaks), which builds on
+  [docs/protocol_t1.md](../docs/protocol_t1.md).
 - **Transport framing and error recovery:** See
   [docs/transport_framing_recovery.md](../docs/transport_framing_recovery.md).

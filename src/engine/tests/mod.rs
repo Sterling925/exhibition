@@ -237,6 +237,8 @@ fn t4() {
     assert!(registry.contains(
                 "register_handler(static_cast<uint8_t>(SubAddress::System), &g_system_handler,"),
             "registry binds system to the System sub-address (with its service hash)");
+    assert!(registry.contains("g_system_handler.set_rx_time_source(&g_rt);"),
+            "registry wires the RT header arrival time as the sync T2 source");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -404,6 +406,9 @@ fn t9() {
     let proto_spec = src_root.join("communication").join("protocol_t1.md");
     assert!(proto_spec.exists(),
         "communication/protocol_t1.md should be copied into the generated tree");
+    let proto_t2 = src_root.join("communication").join("protocol_t2.md");
+    assert!(proto_t2.exists(),
+        "communication/protocol_t2.md should be copied into the generated tree");
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -1379,6 +1384,12 @@ fn t37() {
     ] {
         assert!(!all.contains(stale),
             "stale include '{}' should have been rewritten to an rt/ path", stale);
+    }
+    // Generic guard: no relative-traversal include may survive at all. Sources
+    // live under Core/Src/rt/ while headers live under Core/Inc/rt/, so a
+    // `../` include that resolves in the template tree breaks the RT build.
+    for line in all.lines().filter(|l| l.trim_start().starts_with("#include \"../")) {
+        panic!("relative include '{}' should have been rewritten to an rt/ path", line.trim());
     }
     // And the rewritten forms are present.
     assert!(all.contains("#include \"rt/communication/message_header.h\""),

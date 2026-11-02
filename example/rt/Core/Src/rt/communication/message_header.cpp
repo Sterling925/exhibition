@@ -106,6 +106,12 @@ void MessageHeader::set_payload_crc(uint16_t crc)
     m_header[kIdxPayloadCrcHi] = static_cast<uint8_t>((crc >> 8) & 0xFF);
 }
 
+void MessageHeader::set_inline_payload(uint8_t const* payload)
+{
+    m_header[kIdxPayloadCrcLo] = payload[0];
+    m_header[kIdxPayloadCrcHi] = payload[1];
+}
+
 void MessageHeader::update_header_crc()
 {
     const uint16_t crc = header_crc(m_header, kCrcCoverSize);
@@ -173,6 +179,17 @@ uint16_t MessageHeader::get_payload_crc() const
 {
     return static_cast<uint16_t>(m_header[kIdxPayloadCrcLo])
          | static_cast<uint16_t>(static_cast<uint16_t>(m_header[kIdxPayloadCrcHi]) << 8);
+}
+
+void MessageHeader::get_inline_payload(uint8_t* out) const
+{
+    out[0] = m_header[kIdxPayloadCrcLo];
+    out[1] = m_header[kIdxPayloadCrcHi];
+}
+
+bool MessageHeader::has_payload_chunk() const
+{
+    return get_size_bytes() > kHeaderInlinePayloadBytes;
 }
 
 uint16_t MessageHeader::get_header_crc() const

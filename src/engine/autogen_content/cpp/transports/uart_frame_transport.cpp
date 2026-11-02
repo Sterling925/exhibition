@@ -87,7 +87,9 @@ int32_t UartFrameTransport::receive(uint8_t* out, uint32_t max_length)
                 m_rx_filled = kHeaderBytes - 1u;
                 continue;
             }
-            hdr_payload = hdr.get_size_bytes();
+            // A size-2 (Protocol T2 inline) header carries its payload in the
+            // header itself, so only sizes >= 4 are followed by a chunk.
+            hdr_payload = hdr.has_payload_chunk() ? hdr.get_size_bytes() : 0u;
             break;
         }
     }

@@ -10,6 +10,7 @@
 #include "../api_fingerprint.h"
 #include "../generated/command_ids.h"
 #include "../common/helper_functions.h"
+#include "../communication/scheduler.h"
 
 
 
@@ -24,6 +25,7 @@ SystemHandler::SystemHandler(uint16_t device_count, IClock& clock,
     , m_clock(clock)
     , m_fault_counter(fault_counter)
     , m_smoother(smoother)
+    , m_rx_time_source(nullptr)
     , m_filter()
     , m_last_filter_epoch(0)
     , m_have_filter_epoch(false)
@@ -97,8 +99,11 @@ Status SystemHandler::handle(const MessageHeader& cmd_header,
             return Status::Ok;
         }
         case SystemCmd::SyncProbe: {
-            // Capture the receive instant (T2) before any other work.
-            const uint32_t rx_now = m_clock.now_ms();
+            // Receive instant (T2): the command header's arrival when the RT is
+            // wired as the source, else the handler entry time.
+            const uint32_t rx_now = (m_rx_time_source != nullptr)
+                                        ? m_rx_time_source->cmd_header_rx_ms()
+                                        : m_clock.now_ms();
             if (cmd_header.get_size_bytes() < kSyncCmdBytes ||
                 resp_buf_max < kSyncProbeRespBytes) {
                 return Status::HandlerError;

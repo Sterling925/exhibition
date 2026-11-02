@@ -56,6 +56,7 @@ void init_rt()
     // SysTick reload: the file-scope clock ctor ran pre-PLL (16 MHz default).
     SystemCoreClockUpdate();
     g_clock.sync_from_core_clock();
+    g_system_handler.set_rx_time_source(&g_rt);
     g_rt.register_handler(static_cast<uint8_t>(SubAddress::System), &g_system_handler, kServiceHashSystem);
     g_rt.register_handler(static_cast<uint8_t>(SubAddress::AdcHadc1Ch1), &g_adc_hadc1_ch1, kServiceHashAdc);
     g_rt.register_handler(static_cast<uint8_t>(SubAddress::CanHcan1), &g_can_hcan1, kServiceHashCan);

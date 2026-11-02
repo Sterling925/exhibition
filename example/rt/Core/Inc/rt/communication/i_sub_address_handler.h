@@ -47,7 +47,7 @@ enum class FaultDomain : uint8_t {
 };
 
 
-/// @brief Per-sub-address handler interface invoked by the Protocol T1
+/// @brief Per-sub-address handler interface invoked by the Protocol T2
 ///        RemoteTerminal.
 /// @details
 /// RT calls handle() once a command header and its payload (if any) have

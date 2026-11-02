@@ -72,6 +72,9 @@ pub const STATIC_FILES: &[StaticFile] = &[
         contents: include_str!("cpp/communication/clock_filter.h") },
     StaticFile { rel_path: "communication/protocol_t1.md",
         contents: include_str!("../../../docs/protocol_t1.md") },
+    // T2 is the protocol the generated code speaks; it links back to T1.
+    StaticFile { rel_path: "communication/protocol_t2.md",
+        contents: include_str!("../../../docs/protocol_t2.md") },
 
     // system/
     StaticFile { rel_path: "system/system_handler.h",

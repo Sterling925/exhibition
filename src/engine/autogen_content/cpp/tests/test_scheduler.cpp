@@ -524,13 +524,14 @@ TEST_CASE("BC reports CrcFailPayload on corrupted response payload", "[scheduler
     Status s = Status::Ok;
     REQUIRE(bc.submit(r, capture_completion, &comp, s));
 
-    // Build a response header announcing 2 bytes payload with CRC of [0x01,0x02].
-    uint8_t good_payload[2] = { 0x01, 0x02 };
-    uint16_t payload_c = calc_crc16_lt(good_payload, 2);
+    // Build a response header announcing a 4-byte payload chunk (sizes >= 4
+    // carry a payload CRC; size 2 would be inline) with CRC of [1,2,3,4].
+    uint8_t good_payload[4] = { 0x01, 0x02, 0x03, 0x04 };
+    uint16_t payload_c = calc_crc16_lt(good_payload, 4);
     MessageHeader rh;
     rh.set_priority(MessagePriorities::Medium);
     rh.set_command_flag(false);
-    rh.set_size(PayloadSizes::size_2);
+    rh.set_size(PayloadSizes::size_4);
     rh.set_fault_flag(false);
     rh.set_sub_address(8);
     rh.set_payload_crc(payload_c);
@@ -540,8 +541,8 @@ TEST_CASE("BC reports CrcFailPayload on corrupted response payload", "[scheduler
     const std::vector<uint8_t> resp_hdr(hbuf, hbuf + 6);
 
     // A corrupted payload (different bytes -> CRC mismatch).
-    uint8_t bad_payload[2] = { 0xFF, 0xFF };
-    const std::vector<uint8_t> bad(bad_payload, bad_payload + 2);
+    uint8_t bad_payload[4] = { 0xFF, 0xFF, 0xFF, 0xFF };
+    const std::vector<uint8_t> bad(bad_payload, bad_payload + 4);
 
     bc.tick();                       // Sends cmd header -> WaitRespHeader.
     t.rx_queue.push_back(resp_hdr);
@@ -873,6 +874,24 @@ std::vector<uint8_t> build_cmd_header_bytes(uint8_t sa,
     return out;
 }
 
+/// Header bytes 2-3 value for an inline (size-2) payload {b0, b1}, in the form
+/// build_cmd_header_bytes() takes it (stored little-endian, so b0 lands first).
+uint16_t inline_word(uint8_t b0, uint8_t b1)
+{
+    return static_cast<uint16_t>(b0 | (static_cast<uint16_t>(b1) << 8));
+}
+
+/// Deserialize a sent header frame and return its inline payload bytes.
+std::vector<uint8_t> inline_of(const std::vector<uint8_t>& frame)
+{
+    MessageHeader h;
+    REQUIRE(frame.size() == 6);
+    REQUIRE(h.deserialize(frame.data()));
+    uint8_t b[2];
+    h.get_inline_payload(b);
+    return std::vector<uint8_t>(b, b + 2);
+}
+
 } // namespace
 
 TEST_CASE("RT dispatches valid command to handler exactly once", "[scheduler][rt][happy]")
@@ -885,22 +904,120 @@ TEST_CASE("RT dispatches valid command to handler exactly once", "[scheduler][rt
     handler.next_return = Status::Ok;
     rt.register_handler(4, &handler);
 
-    uint8_t payload[2] = { 0x77, 0x88 };
-    uint16_t pcrc = calc_crc16_lt(payload, 2);
+    uint8_t payload[4] = { 0x77, 0x88, 0x99, 0xAA };
+    uint16_t pcrc = calc_crc16_lt(payload, 4);
     auto hdr_bytes = build_cmd_header_bytes(4, MessagePriorities::Medium,
-                                            PayloadSizes::size_2, pcrc);
+                                            PayloadSizes::size_4, pcrc);
     t.rx_queue.push_back(hdr_bytes);
-    t.rx_queue.push_back(std::vector<uint8_t>(payload, payload + 2));
+    t.rx_queue.push_back(std::vector<uint8_t>(payload, payload + 4));
 
     rt.tick();   // Header -> ack -> state RxPayload.
     rt.tick();   // Payload -> handler -> final ack.
 
     REQUIRE(handler.calls.size() == 1);
+    REQUIRE(handler.calls[0].payload.size() == 4);
+    REQUIRE(handler.calls[0].payload[0] == 0x77);
+    REQUIRE(handler.calls[0].payload[3] == 0xAA);
+    REQUIRE(t.tx_queue.size() == 2);   // Two acks.
+    REQUIRE(rt_fc.count == 0);         // A clean command is not a fault.
+}
+
+TEST_CASE("RT dispatches an inline 2-byte command with no intermediate ack",
+          "[scheduler][rt][inline]")
+{
+    FakeTransport t;
+    FakeClock c;
+    FaultCounter rt_fc; RemoteTerminal rt(t, c, rt_fc);
+
+    RecordingHandler handler;
+    rt.register_handler(4, &handler);
+
+    // Protocol T2: the payload rides in header bytes 2-3; no chunk follows.
+    t.rx_queue.push_back(build_cmd_header_bytes(4, MessagePriorities::Medium,
+                                                PayloadSizes::size_2,
+                                                inline_word(0x77, 0x88)));
+    rt.tick();   // Header carries the whole command -> handler -> final ack.
+
+    REQUIRE(handler.calls.size() == 1);
     REQUIRE(handler.calls[0].payload.size() == 2);
     REQUIRE(handler.calls[0].payload[0] == 0x77);
     REQUIRE(handler.calls[0].payload[1] == 0x88);
-    REQUIRE(t.tx_queue.size() == 2);   // Two acks.
-    REQUIRE(rt_fc.count == 0);         // A clean command is not a fault.
+    REQUIRE(t.tx_queue.size() == 1);   // Only the final size-0 ack.
+    MessageHeader ack;
+    REQUIRE(ack.deserialize(t.tx_queue.front().data()));
+    REQUIRE(ack.get_size_bytes() == 0);
+    REQUIRE_FALSE(ack.get_fault_flag());
+}
+
+TEST_CASE("RT answers an inline command with an inline 2-byte response",
+          "[scheduler][rt][inline]")
+{
+    FakeTransport t;
+    FakeClock c;
+    FaultCounter rt_fc; RemoteTerminal rt(t, c, rt_fc);
+
+    RecordingHandler handler;
+    handler.next_response = { 0x5A, 0xA5 };
+    rt.register_handler(4, &handler);
+
+    t.rx_queue.push_back(build_cmd_header_bytes(4, MessagePriorities::Medium,
+                                                PayloadSizes::size_2,
+                                                inline_word(0x01, 0x03)));
+    rt.tick();
+
+    // One response header whose bytes 2-3 are the payload; no chunk.
+    REQUIRE(t.tx_queue.size() == 1);
+    MessageHeader resp;
+    REQUIRE(resp.deserialize(t.tx_queue.front().data()));
+    REQUIRE(resp.get_size_bytes() == 2);
+    REQUIRE_FALSE(resp.has_payload_chunk());
+    REQUIRE(inline_of(t.tx_queue.front()) == std::vector<uint8_t>{ 0x5A, 0xA5 });
+}
+
+TEST_CASE("RT silently drops an inline command whose bytes were corrupted",
+          "[scheduler][rt][inline][crc]")
+{
+    FakeTransport t;
+    FakeClock c;
+    FaultCounter rt_fc; RemoteTerminal rt(t, c, rt_fc);
+
+    RecordingHandler handler;
+    rt.register_handler(4, &handler);
+
+    // The header CRC covers the inline payload, so flipping a payload byte
+    // fails the header check: no CrcFailPayload fault, just a silent drop.
+    auto hdr = build_cmd_header_bytes(4, MessagePriorities::Medium,
+                                      PayloadSizes::size_2, inline_word(0x01, 0x02));
+    hdr[3] ^= 0x40;
+    t.rx_queue.push_back(hdr);
+    rt.tick();
+
+    REQUIRE(handler.calls.empty());
+    REQUIRE(t.tx_queue.empty());
+    REQUIRE(rt_fc.count == 1);
+}
+
+TEST_CASE("RT records the command header arrival time", "[scheduler][rt][sync]")
+{
+    FakeTransport t;
+    FakeClock c;
+    FaultCounter rt_fc; RemoteTerminal rt(t, c, rt_fc);
+
+    RecordingHandler handler;
+    rt.register_handler(4, &handler);
+
+    uint8_t payload[4] = { 0x01, 0x02, 0x03, 0x04 };
+    t.rx_queue.push_back(build_cmd_header_bytes(4, MessagePriorities::Medium,
+                                                PayloadSizes::size_4,
+                                                calc_crc16_lt(payload, 4)));
+    c.m_now_ms = 100;
+    rt.tick();   // Header arrives at t=100 -> ack.
+    t.rx_queue.push_back(std::vector<uint8_t>(payload, payload + 4));
+    c.m_now_ms = 107;
+    rt.tick();   // Payload arrives later; the stamp stays at the header.
+
+    REQUIRE(handler.calls.size() == 1);
+    REQUIRE(rt.cmd_header_rx_ms() == 100);
 }
 
 TEST_CASE("RT handler error produces fault frame", "[scheduler][rt][handler_err]")
@@ -964,26 +1081,26 @@ TEST_CASE("RT rejects payload with bad CRC and returns to Idle", "[scheduler][rt
     RecordingHandler handler;
     rt.register_handler(4, &handler);
 
-    // Header announces 2 bytes with a CRC that won't match what we deliver.
+    // Header announces a 4-byte chunk with a CRC that won't match what we deliver.
     auto hdr_bytes = build_cmd_header_bytes(4, MessagePriorities::Medium,
-                                            PayloadSizes::size_2, 0xBEEF);
+                                            PayloadSizes::size_4, 0xBEEF);
     t.rx_queue.push_back(hdr_bytes);
     rt.tick();   // Cmd header -> ack -> RxPayload.
 
-    uint8_t bad_payload[2] = { 0x00, 0x00 };  // CRC of these bytes != 0xBEEF.
-    t.rx_queue.push_back(std::vector<uint8_t>(bad_payload, bad_payload + 2));
+    uint8_t bad_payload[4] = { 0x00, 0x00, 0x00, 0x00 };  // CRC != 0xBEEF.
+    t.rx_queue.push_back(std::vector<uint8_t>(bad_payload, bad_payload + 4));
     rt.tick();   // Detect CRC fail, emit fault, return to Idle.
 
     REQUIRE(handler.calls.empty());
-    // initial ack + fault header + fault status payload = 3 frames.
-    REQUIRE(t.tx_queue.size() == 3);
+    // initial ack + inline fault header = 2 frames.
+    REQUIRE(t.tx_queue.size() == 2);
     MessageHeader fault;
     REQUIRE(fault.deserialize(t.tx_queue[1].data()));
     REQUIRE(fault.get_fault_flag() == true);
     REQUIRE(fault.get_size_bytes() == 2);
-    REQUIRE(t.tx_queue.back().size() == 2);
-    REQUIRE(t.tx_queue.back()[0] == static_cast<uint8_t>(FaultDomain::Protocol));
-    REQUIRE(t.tx_queue.back()[1] == static_cast<uint8_t>(Status::CrcFailPayload));
+    REQUIRE(inline_of(t.tx_queue.back()) ==
+            std::vector<uint8_t>{ static_cast<uint8_t>(FaultDomain::Protocol),
+                                  static_cast<uint8_t>(Status::CrcFailPayload) });
     REQUIRE(rt_fc.count == 1);   // A bad payload CRC counts as a message fault.
 }
 
@@ -999,15 +1116,15 @@ TEST_CASE("RT faults an unregistered sub-address with InvalidSubAddress", "[sche
     t.rx_queue.push_back(hdr_bytes);
     rt.tick();
 
-    // Fault header + 2-byte status payload (no preceding ack on this path).
-    REQUIRE(t.tx_queue.size() == 2);
+    // A single fault header with the 2-byte status inline (no preceding ack).
+    REQUIRE(t.tx_queue.size() == 1);
     MessageHeader fault;
     REQUIRE(fault.deserialize(t.tx_queue.front().data()));
     REQUIRE(fault.get_fault_flag() == true);
     REQUIRE(fault.get_size_bytes() == 2);
-    REQUIRE(t.tx_queue.back().size() == 2);
-    REQUIRE(t.tx_queue.back()[0] == static_cast<uint8_t>(FaultDomain::Protocol));
-    REQUIRE(t.tx_queue.back()[1] == static_cast<uint8_t>(Status::InvalidSubAddress));
+    REQUIRE(inline_of(t.tx_queue.front()) ==
+            std::vector<uint8_t>{ static_cast<uint8_t>(FaultDomain::Protocol),
+                                  static_cast<uint8_t>(Status::InvalidSubAddress) });
     REQUIRE(rt_fc.count == 0);   // An unhandled sub-address is not a message fault.
 }
 
@@ -1023,12 +1140,13 @@ TEST_CASE("RT faults an out-of-range sub-address with InvalidSubAddress", "[sche
     t.rx_queue.push_back(hdr_bytes);
     rt.tick();
 
-    REQUIRE(t.tx_queue.size() == 2);
+    REQUIRE(t.tx_queue.size() == 1);
     MessageHeader fault;
     REQUIRE(fault.deserialize(t.tx_queue.front().data()));
     REQUIRE(fault.get_fault_flag() == true);
-    REQUIRE(t.tx_queue.back()[0] == static_cast<uint8_t>(FaultDomain::Protocol));
-    REQUIRE(t.tx_queue.back()[1] == static_cast<uint8_t>(Status::InvalidSubAddress));
+    REQUIRE(inline_of(t.tx_queue.front()) ==
+            std::vector<uint8_t>{ static_cast<uint8_t>(FaultDomain::Protocol),
+                                  static_cast<uint8_t>(Status::InvalidSubAddress) });
 }
 
 TEST_CASE("RT faults an oversized declared payload with PayloadTooLarge", "[scheduler][rt][fault]")
@@ -1048,14 +1166,15 @@ TEST_CASE("RT faults an oversized declared payload with PayloadTooLarge", "[sche
     rt.tick();   // Detect oversize -> fault -> Idle.
 
     REQUIRE(handler.calls.empty());
-    // initial ack + fault header + fault status payload = 3 frames.
-    REQUIRE(t.tx_queue.size() == 3);
+    // initial ack + inline fault header = 2 frames.
+    REQUIRE(t.tx_queue.size() == 2);
     MessageHeader fault;
     REQUIRE(fault.deserialize(t.tx_queue[1].data()));
     REQUIRE(fault.get_fault_flag() == true);
     REQUIRE(fault.get_size_bytes() == 2);
-    REQUIRE(t.tx_queue.back()[0] == static_cast<uint8_t>(FaultDomain::Protocol));
-    REQUIRE(t.tx_queue.back()[1] == static_cast<uint8_t>(Status::PayloadTooLarge));
+    REQUIRE(inline_of(t.tx_queue.back()) ==
+            std::vector<uint8_t>{ static_cast<uint8_t>(FaultDomain::Protocol),
+                                  static_cast<uint8_t>(Status::PayloadTooLarge) });
     REQUIRE(rt_fc.count == 0);   // An oversize declared payload is not counted.
 }
 
@@ -1068,11 +1187,11 @@ TEST_CASE("RT resyncs transport when a command payload times out", "[scheduler][
     RecordingHandler handler;
     rt.register_handler(4, &handler);
 
-    // Header announces a 2-byte payload that never arrives.
-    uint8_t payload[2] = { 0x01, 0x02 };
-    uint16_t pcrc = calc_crc16_lt(payload, 2);
+    // Header announces a 4-byte payload chunk that never arrives.
+    uint8_t payload[4] = { 0x01, 0x02, 0x03, 0x04 };
+    uint16_t pcrc = calc_crc16_lt(payload, 4);
     auto hdr_bytes = build_cmd_header_bytes(4, MessagePriorities::Medium,
-                                            PayloadSizes::size_2, pcrc);
+                                            PayloadSizes::size_4, pcrc);
     t.rx_queue.push_back(hdr_bytes);
 
     rt.tick();                       // Header -> ack -> RxPayload (deadline = 0 + 50).
@@ -1101,13 +1220,13 @@ TEST_CASE("BC momentary short read keeps waiting, no reset, then completes", "[s
 
     bc.tick();   // Sends size-0 read cmd header -> WaitRespHeader.
 
-    // Response header announcing a 2-byte payload.
-    uint8_t good_payload[2] = { 0x01, 0x02 };
-    uint16_t pcrc = calc_crc16_lt(good_payload, 2);
+    // Response header announcing a 4-byte payload chunk.
+    uint8_t good_payload[4] = { 0x01, 0x02, 0x03, 0x04 };
+    uint16_t pcrc = calc_crc16_lt(good_payload, 4);
     MessageHeader rh;
     rh.set_priority(MessagePriorities::Medium);
     rh.set_command_flag(false);
-    rh.set_size(PayloadSizes::size_2);
+    rh.set_size(PayloadSizes::size_4);
     rh.set_fault_flag(false);
     rh.set_sub_address(8);
     rh.set_payload_crc(pcrc);
@@ -1126,7 +1245,7 @@ TEST_CASE("BC momentary short read keeps waiting, no reset, then completes", "[s
     REQUIRE(t.reset_rx_calls == 0);
 
     // The payload now arrives; the transaction completes normally.
-    t.rx_queue.push_back(std::vector<uint8_t>(good_payload, good_payload + 2));
+    t.rx_queue.push_back(std::vector<uint8_t>(good_payload, good_payload + 4));
     bc.tick();
     REQUIRE(comp.fired);
     REQUIRE(comp.status == Status::Ok);
@@ -1255,15 +1374,15 @@ TEST_CASE("BC retries a CRC-class RemoteFault then succeeds", "[scheduler][bc][r
     // RT protocol-domain fault whose reason is CrcFailPayload -> retryable.
     uint8_t fault_payload[2] = { static_cast<uint8_t>(FaultDomain::Protocol),
                                  static_cast<uint8_t>(Status::CrcFailPayload) };
-    uint16_t fp_crc = calc_crc16_lt(fault_payload, 2);
+    // Protocol T2: the 2-byte fault rides inline in the fault header.
     auto fault_hdr = build_cmd_header_bytes(5, MessagePriorities::Medium,
-                                            PayloadSizes::size_2, fp_crc, true, false);
+                                            PayloadSizes::size_2,
+                                            inline_word(fault_payload[0], fault_payload[1]),
+                                            true, false);
 
     bc.tick();                          // Send header -> WaitCmdAck.
     t.rx_queue.push_back(fault_hdr);
-    t.rx_queue.push_back(std::vector<uint8_t>(fault_payload, fault_payload + 2));
-    bc.tick();                          // Recv fault header -> RecvRespPayload.
-    bc.tick();                          // Recv fault payload -> retry (counted).
+    bc.tick();                          // Recv inline fault -> retry (counted).
     REQUIRE_FALSE(comp.fired);
     REQUIRE(bc.fault_count() == 1);
 
@@ -1293,15 +1412,14 @@ TEST_CASE("BC does not retry a non-CRC RemoteFault", "[scheduler][bc][retry][fau
     // RT protocol-domain fault whose reason is InvalidSubAddress -> NOT retryable.
     uint8_t fault_payload[2] = { static_cast<uint8_t>(FaultDomain::Protocol),
                                  static_cast<uint8_t>(Status::InvalidSubAddress) };
-    uint16_t fp_crc = calc_crc16_lt(fault_payload, 2);
     auto fault_hdr = build_cmd_header_bytes(5, MessagePriorities::Medium,
-                                            PayloadSizes::size_2, fp_crc, true, false);
+                                            PayloadSizes::size_2,
+                                            inline_word(fault_payload[0], fault_payload[1]),
+                                            true, false);
 
     bc.tick();
     t.rx_queue.push_back(fault_hdr);
-    t.rx_queue.push_back(std::vector<uint8_t>(fault_payload, fault_payload + 2));
-    bc.tick();                          // Recv fault header.
-    bc.tick();                          // Recv fault payload -> RemoteFault, no retry.
+    bc.tick();                          // Recv inline fault -> RemoteFault, no retry.
     REQUIRE(comp.fired);
     REQUIRE(comp.status == Status::RemoteFault);
     REQUIRE(bc.fault_count() == 0);
@@ -1346,4 +1464,133 @@ TEST_CASE("RT message-fault counter is read back over the bus", "[scheduler][rt]
                        | (static_cast<uint32_t>(comp.payload[2]) << 16)
                        | (static_cast<uint32_t>(comp.payload[3]) << 24);
     REQUIRE(got == 3u);
+}
+
+
+///////////////////////////////////////////////////////////////////////////////
+// Protocol T2 inline (size-2) payload tests over a paired BC <-> RT link
+///////////////////////////////////////////////////////////////////////////////
+
+TEST_CASE("BC inline 2-byte write is a 2-frame exchange", "[scheduler][bc][t2]")
+{
+    FakeTransport tb, tr; tb.peer = &tr; tr.peer = &tb;
+    FakeClock c;
+    BusController bc(tb, c);
+    FaultCounter rt_fc; RemoteTerminal rt(tr, c, rt_fc);
+
+    RecordingHandler handler;
+    rt.register_handler(6, &handler);
+
+    uint8_t cmd[2] = { 0x01, 0x05 };   // e.g. GPIO SET pin 5
+    Request r = make_inline_write(6, MessagePriorities::Medium,
+                                  PayloadSizes::size_2, cmd, 2);
+    Completion comp;
+    Status s = Status::Ok;
+    REQUIRE(bc.submit(r, capture_completion, &comp, s));
+
+    drive_until_completion(bc, rt, comp);
+    REQUIRE(comp.fired);
+    REQUIRE(comp.status == Status::Ok);
+    REQUIRE(handler.calls.size() == 1);
+    REQUIRE(handler.calls[0].payload == std::vector<uint8_t>{ 0x01, 0x05 });
+    REQUIRE(tb.tx_queue.size() == 1);   // BC: inline command header only.
+    REQUIRE(tr.tx_queue.size() == 1);   // RT: final ack only.
+}
+
+TEST_CASE("BC inline read with a 2-byte response is a 2-frame exchange", "[scheduler][bc][t2]")
+{
+    FakeTransport tb, tr; tb.peer = &tr; tr.peer = &tb;
+    FakeClock c;
+    BusController bc(tb, c);
+    FaultCounter rt_fc; RemoteTerminal rt(tr, c, rt_fc);
+
+    RecordingHandler handler;
+    handler.next_response = { 0x01 };   // 1 byte, padded to the size-2 slot.
+    rt.register_handler(6, &handler);
+
+    uint8_t cmd[2] = { 0x01, 0x03 };
+    Request r = make_inline_write(6, MessagePriorities::Medium,
+                                  PayloadSizes::size_2, cmd, 2);
+    r.is_read      = true;
+    r.resp_buf_max = kInlinePayloadBytes;
+    Completion comp;
+    Status s = Status::Ok;
+    REQUIRE(bc.submit(r, capture_completion, &comp, s));
+
+    drive_until_completion(bc, rt, comp);
+    REQUIRE(comp.fired);
+    REQUIRE(comp.status == Status::Ok);
+    REQUIRE(comp.payload == std::vector<uint8_t>{ 0x01, 0x00 });
+    REQUIRE(tb.tx_queue.size() == 1);
+    REQUIRE(tr.tx_queue.size() == 1);   // Inline response header, no chunk.
+}
+
+TEST_CASE("BC inline read with a 4-byte response is a 3-frame exchange", "[scheduler][bc][t2]")
+{
+    FakeTransport tb, tr; tb.peer = &tr; tr.peer = &tb;
+    FakeClock c;
+    BusController bc(tb, c);
+    FaultCounter rt_fc; RemoteTerminal rt(tr, c, rt_fc);
+
+    RecordingHandler handler;
+    handler.next_response = { 0xDE, 0xAD, 0xBE, 0xEF };
+    rt.register_handler(6, &handler);
+
+    uint8_t cmd[2] = { 0x01, 0x00 };   // 0-arg read: opcode + pad.
+    Request r = make_inline_write(6, MessagePriorities::Medium,
+                                  PayloadSizes::size_2, cmd, 2);
+    r.is_read      = true;
+    r.resp_buf_max = kInlinePayloadBytes;
+    Completion comp;
+    Status s = Status::Ok;
+    REQUIRE(bc.submit(r, capture_completion, &comp, s));
+
+    drive_until_completion(bc, rt, comp);
+    REQUIRE(comp.fired);
+    REQUIRE(comp.status == Status::Ok);
+    REQUIRE(comp.payload == std::vector<uint8_t>{ 0xDE, 0xAD, 0xBE, 0xEF });
+    REQUIRE(tb.tx_queue.size() == 1);   // No intermediate ack round trip.
+    REQUIRE(tr.tx_queue.size() == 2);   // Response header + payload chunk.
+}
+
+TEST_CASE("BC retries a size-4 command after an inline CrcFailPayload fault",
+          "[scheduler][bc][t2][retry]")
+{
+    FakeTransport t;
+    FakeClock     c;
+    BusController bc(t, c);
+    Completion    comp;
+
+    uint8_t cmd[4] = { 0x01, 0x02, 0x03, 0x04 };
+    Request r = make_inline_write(5, MessagePriorities::Medium,
+                                  PayloadSizes::size_4, cmd, 4);
+    Status s = Status::Ok;
+    REQUIRE(bc.submit(r, capture_completion, &comp, s));
+
+    auto ack = build_cmd_header_bytes(5, MessagePriorities::Medium,
+                                      PayloadSizes::size_0, 0, false, false);
+    auto fault_hdr = build_cmd_header_bytes(
+        5, MessagePriorities::Medium, PayloadSizes::size_2,
+        inline_word(static_cast<uint8_t>(FaultDomain::Protocol),
+                    static_cast<uint8_t>(Status::CrcFailPayload)),
+        true, false);
+
+    bc.tick();                       // Header -> WaitCmdAck.
+    t.rx_queue.push_back(ack);
+    bc.tick();                       // Ack -> SendCmdPayload.
+    bc.tick();                       // Payload sent -> WaitWriteAck.
+    t.rx_queue.push_back(fault_hdr);
+    bc.tick();                       // Inline CrcFailPayload -> retry.
+    REQUIRE_FALSE(comp.fired);
+    REQUIRE(bc.fault_count() == 1);
+
+    bc.tick();                       // Re-send header.
+    t.rx_queue.push_back(ack);
+    bc.tick();
+    bc.tick();                       // Re-send payload.
+    t.rx_queue.push_back(ack);
+    bc.tick();                       // Final ack -> Ok.
+    REQUIRE(comp.fired);
+    REQUIRE(comp.status == Status::Ok);
+    REQUIRE(bc.fault_count() == 1);
 }

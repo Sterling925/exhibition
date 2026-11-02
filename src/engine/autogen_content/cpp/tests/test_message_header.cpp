@@ -361,3 +361,49 @@ TEST_CASE("Deserialize succeeds on a known-good byte pattern", "[message_header]
     REQUIRE(h.get_header_crc()   == header_crc);
     REQUIRE(h.check_header_crc() == true);
 }
+
+
+TEST_CASE("Inline payload round-trips through header bytes 2-3", "[message_header][t2]")
+{
+    MessageHeader h;
+    h.set_priority(MessagePriorities::Medium);
+    h.set_command_flag(true);
+    h.set_size(PayloadSizes::size_2);
+    h.set_fault_flag(false);
+    h.set_sub_address(3);
+    const uint8_t in[2] = { 0x12, 0xAB };
+    h.set_inline_payload(in);
+    h.update_header_crc();
+
+    uint8_t buf[6];
+    REQUIRE(h.serialize(buf, sizeof(buf)));
+    REQUIRE(buf[2] == 0x12);   // Wire order: byte 2 = payload[0].
+    REQUIRE(buf[3] == 0xAB);
+
+    MessageHeader back;
+    REQUIRE(back.deserialize(buf));
+    uint8_t out[2] = { 0, 0 };
+    back.get_inline_payload(out);
+    REQUIRE(out[0] == 0x12);
+    REQUIRE(out[1] == 0xAB);
+    // The same bytes read as the little-endian payload-CRC field.
+    REQUIRE(back.get_payload_crc() == 0xAB12);
+
+    // The header CRC covers the inline payload: corrupting it fails deserialize.
+    buf[3] ^= 0x01;
+    MessageHeader bad;
+    REQUIRE_FALSE(bad.deserialize(buf));
+}
+
+TEST_CASE("has_payload_chunk is false only for sizes 0 and 2", "[message_header][t2]")
+{
+    MessageHeader h;
+    h.set_size(PayloadSizes::size_0);
+    REQUIRE_FALSE(h.has_payload_chunk());
+    h.set_size(PayloadSizes::size_2);
+    REQUIRE_FALSE(h.has_payload_chunk());
+    h.set_size(PayloadSizes::size_4);
+    REQUIRE(h.has_payload_chunk());
+    h.set_size(PayloadSizes::size_2048);
+    REQUIRE(h.has_payload_chunk());
+}

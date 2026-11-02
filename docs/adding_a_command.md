@@ -264,10 +264,17 @@ smallest valid `PayloadSizes` slot.
 
 ## 3. Payload Size Constraints
 
-Protocol T1 supports a sparse set of payload sizes:
+Protocol T2 supports a sparse set of payload sizes:
 `0, 2, 4, 6, 8, 10, 12, 14, 16, 32, 64, 128, 256, 512, 1024, 2048` bytes.
 Every command and response payload must fit into one of these slots; zero-padding
 to the slot boundary is automatic on the BC side.
+
+**The 2-byte slot is the fast path.** A 2-byte payload rides inline in the frame
+header (see [protocol_t2.md](protocol_t2.md)), so a command of opcode + at most one
+argument byte skips the intermediate ack round trip and the payload chunk, and a
+response of at most 2 bytes skips its payload chunk. One more byte (e.g. opcode +
+`uint16_t`) moves to the 4-byte slot and the full exchange; when designing a
+frequently issued command, it is worth fitting it into 2 bytes.
 
 The RT's scratch buffer is bounded by `kMaxPayloadBytes` (defined in
 `autogen_content/cpp/communication/scheduler.h`, default `64`).  The RT rejects

@@ -290,6 +290,8 @@ struct SyncRig {
         tb.peer = &tr;
         tr.peer = &tb;
         rt.register_handler(1, &sys);
+        // As the generated RT main does: T2 is the command header's arrival.
+        sys.set_rx_time_source(&rt);
     }
 };
 
@@ -345,12 +347,17 @@ TEST_CASE("e2e: offset recovered within the framing residual under propagation",
     const SyncOutcome r = sync_once_e2e(rig.bc, rig.rt, rig.bc_clock, rig.rt_clock, 1u);
     REQUIRE(r.status == Status::Ok);
 
-    // Serialization check: the returned values are exactly the Cristian formula
-    // applied to the timestamps actually captured.
-    REQUIRE(r.path_delay == Catch::Approx(static_cast<double>(r.t4 - r.t1) / 2.0));
-    const double expected_offset =
-        (static_cast<double>(r.t1) + static_cast<double>(r.t4)) / 2.0 - static_cast<double>(r.t2);
+    // Serialization check: the returned values are exactly the four-timestamp
+    // formulas applied to the timestamps actually captured. T3 - T2 is non-zero
+    // here because T2 is the header's arrival and T3 follows the ack and payload.
+    const double t1 = r.t1, t2 = r.t2, t3 = r.t3, t4 = r.t4;
+    REQUIRE(r.path_delay == Catch::Approx(((t4 - t1) - (t3 - t2)) / 2.0));
+    const double expected_offset = ((t1 - t2) + (t4 - t3)) / 2.0;
     REQUIRE(r.offset == Catch::Approx(expected_offset).margin(0.51));
+
+    // T2 is stamped when the SYNC_PROBE header reaches the RT (the first RT tick,
+    // RT clock 1012), not when its payload lands after the ack round trip.
+    REQUIRE(r.t2 == 1012u);
 
     // The recovered offset is near the true -12, off only by the framing residual.
     REQUIRE(r.offset == Catch::Approx(-12.0).margin(r.path_delay + 1.0));

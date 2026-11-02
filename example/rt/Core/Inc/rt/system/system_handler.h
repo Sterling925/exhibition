@@ -11,8 +11,10 @@
 #include "rt/communication/sync.h"
 #include "rt/communication/offset_smoother.h"
 #include "rt/communication/phase_anchor.h"
-#include "../communication/clock_filter.h"
+#include "rt/communication/clock_filter.h"
 #include "rt/communication/fault_counter.h"
+
+class RemoteTerminal;
 
 
 /// @brief Sub-address handler bound to sub-address 1 for project metadata and
@@ -120,6 +122,16 @@ class SystemHandler : public ISubAddressHandler {
                   uint32_t resp_buf_max,
                   uint32_t& resp_len_out) override;
 
+    /// @brief Take the time-sync receive stamp (T2) from the RemoteTerminal's
+    ///        command-header arrival time instead of the handler entry time.
+    /// @details The header arrives before the intermediate ack and the payload
+    ///          chunk, so stamping there keeps those legs out of the forward
+    ///          path and makes it match the one-leg return path. When unset
+    ///          (nullptr, e.g. a handler driven directly in a unit test), T2
+    ///          falls back to the clock at handler entry.
+    /// @param rt RemoteTerminal this handler is registered with; must outlive *this.
+    void set_rx_time_source(RemoteTerminal const* rt) { m_rx_time_source = rt; }
+
     /// @brief Returns true once a SOFT_RESET command has been processed.
     /// @details The caller must poll this after every tick() and, when true,
     ///          call HAL_Delay(10); HAL_NVIC_SystemReset(); to allow the
@@ -133,6 +145,7 @@ class SystemHandler : public ISubAddressHandler {
     const FaultCounter& m_fault_counter;
     OffsetSmoother&     m_smoother;
     SyncState           m_sync;
+    RemoteTerminal const* m_rx_time_source;   ///< Optional T2 source; may be null.
 
     /// @brief Sliding 8-deep min-delay clock filter (NTP-style). Every SYNC_FINAL
     ///        pushes its raw (offset, delay) sample; the lowest-delay sample of the

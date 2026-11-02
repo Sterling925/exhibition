@@ -112,7 +112,13 @@ void BusController::build_cmd_header(const Request& req, MessageHeader& out) con
     out.set_size(req.cmd_size);
     out.set_fault_flag(false);   // No fault on outbound commands.
     out.set_sub_address(req.sub_address);
-    out.set_payload_crc(payload_crc(payload, req.cmd_len));
+    if (req.cmd_len == kHeaderInlinePayloadBytes) {
+        // Protocol T2: a 2-byte command rides inline in header bytes 2-3 and
+        // is covered by the header CRC; no payload chunk follows.
+        out.set_inline_payload(payload);
+    } else {
+        out.set_payload_crc(payload_crc(payload, req.cmd_len));
+    }
     out.update_header_crc();
 }
 
@@ -246,6 +252,24 @@ void BusController::complete_slot(uint8_t sub_addr, Status status)
     }
 }
 
+void BusController::complete_inline_resp(uint8_t sub_addr)
+{
+    // Protocol T2: a size-2 response (normal or fault) carries its payload in
+    // header bytes 2-3. Land it in the slot's response buffer exactly as a
+    // payload chunk would, so callbacks and fail_slot()'s retry check (which
+    // reads the fault domain/reason from resp_buf) see the same bytes.
+    BcSlot& s = m_slots[sub_addr];
+    uint32_t cap      = 0;
+    uint8_t* resp_buf = slot_resp_buf(s, cap);
+    s.resp_header.get_inline_payload(resp_buf);
+    s.resp_len = kHeaderInlinePayloadBytes;
+    if (s.ack_was_fault) {
+        fail_slot(sub_addr, Status::RemoteFault);
+    } else {
+        complete_slot(sub_addr, Status::Ok);
+    }
+}
+
 void BusController::fail_slot(uint8_t sub_addr, Status status)
 {
     BcSlot& s = m_slots[sub_addr];
@@ -329,9 +353,10 @@ void BusController::advance_slot(uint8_t sub_addr, bool& did_send, bool& did_rec
             return;
         }
         if (r == 6) {
-            // Size-0 reads have no separate header-receipt ack on the wire;
-            // the next frame is the response header carrying the data.
-            if (s.req.cmd_len == 0 && s.req.is_read) {
+            // Size-0 and inline (size-2) reads have no separate header-receipt
+            // ack on the wire; the next frame is the response header carrying
+            // the data.
+            if (!s.pending_header.has_payload_chunk() && s.req.is_read) {
                 s.state = BcSlotState::WaitRespHeader;
             } else {
                 s.state = BcSlotState::WaitCmdAck;
@@ -373,16 +398,19 @@ void BusController::advance_slot(uint8_t sub_addr, bool& did_send, bool& did_rec
         if (hdr.get_fault_flag()) {
             // Fault ack. Receive the fault payload if any, then complete.
             s.ack_was_fault = true;
-            if (hdr.get_size_bytes() > 0) {
+            if (hdr.has_payload_chunk()) {
                 s.state       = BcSlotState::RecvRespPayload;
                 s.deadline_ms = now + kFrameTimeoutMs;
+            } else if (hdr.get_size_bytes() == kHeaderInlinePayloadBytes) {
+                complete_inline_resp(sub_addr);
             } else {
                 fail_slot(sub_addr, Status::RemoteFault);
             }
             return;
         }
-        // Normal ack. Proceed to send payload, or wrap up.
-        if (s.req.cmd_len > 0) {
+        // Normal ack. Proceed to send payload, or wrap up. An inline (size-2)
+        // write has no payload chunk, so this ack is its final one.
+        if (s.pending_header.has_payload_chunk()) {
             s.state       = BcSlotState::SendCmdPayload;
             s.deadline_ms = now + kFrameTimeoutMs;
         } else if (s.req.is_read) {
@@ -444,9 +472,11 @@ void BusController::advance_slot(uint8_t sub_addr, bool& did_send, bool& did_rec
         s.resp_header = hdr;
         if (hdr.get_fault_flag()) {
             s.ack_was_fault = true;
-            if (hdr.get_size_bytes() > 0) {
+            if (hdr.has_payload_chunk()) {
                 s.state       = BcSlotState::RecvRespPayload;
                 s.deadline_ms = now + kFrameTimeoutMs;
+            } else if (hdr.get_size_bytes() == kHeaderInlinePayloadBytes) {
+                complete_inline_resp(sub_addr);
             } else {
                 fail_slot(sub_addr, Status::RemoteFault);
             }
@@ -483,9 +513,11 @@ void BusController::advance_slot(uint8_t sub_addr, bool& did_send, bool& did_rec
         if (hdr.get_fault_flag()) {
             s.ack_was_fault = true;
         }
-        if (hdr.get_size_bytes() > 0) {
+        if (hdr.has_payload_chunk()) {
             s.state       = BcSlotState::RecvRespPayload;
             s.deadline_ms = now + kFrameTimeoutMs;
+        } else if (hdr.get_size_bytes() == kHeaderInlinePayloadBytes) {
+            complete_inline_resp(sub_addr);
         } else if (s.ack_was_fault) {
             fail_slot(sub_addr, Status::RemoteFault);
         } else {
@@ -568,6 +600,7 @@ RemoteTerminal::RemoteTerminal(IFrameTransport& transport, IClock& clock, FaultC
     , m_fault_counter(fault_counter)
     , m_state(RtState::Idle)
     , m_deadline_ms(0)
+    , m_cmd_rx_ms(0)
     , m_resp_len(0)
 {
     for (uint8_t i = 0; i < kMaxSubAddresses; ++i) {
@@ -600,7 +633,14 @@ bool RemoteTerminal::send_ack(uint8_t sub_addr,
     hdr.set_size(size);
     hdr.set_fault_flag(fault);
     hdr.set_sub_address(sub_addr);
-    hdr.set_payload_crc(payload_crc(payload, payload_len));
+    // Protocol T2: a 2-byte payload rides inline in header bytes 2-3 and no
+    // payload chunk follows it.
+    const bool inline_payload = (size == PayloadSizes::size_2 && payload != nullptr);
+    if (inline_payload) {
+        hdr.set_inline_payload(payload);
+    } else {
+        hdr.set_payload_crc(payload_crc(payload, payload_len));
+    }
     hdr.update_header_crc();
 
     uint8_t buf[6];
@@ -611,7 +651,7 @@ bool RemoteTerminal::send_ack(uint8_t sub_addr,
     if (r != 6) {
         return false;
     }
-    if (payload_len > 0 && payload != nullptr) {
+    if (!inline_payload && payload_len > 0 && payload != nullptr) {
         r = m_transport.send(payload, payload_len);
         if (r != static_cast<int32_t>(payload_len)) {
             return false;
@@ -639,6 +679,86 @@ void RemoteTerminal::abort_rx()
     m_transport.reset_rx();
 }
 
+void RemoteTerminal::dispatch_command(uint32_t now)
+{
+    const uint8_t sa = m_active_cmd_header.get_sub_address();
+    ISubAddressHandler* h = m_handlers[sa];
+    m_resp_len = 0;
+
+    // Universal command: opcode 0x00 (GET_SERVICE_HASH) is answered here by
+    // the framework, before the handler runs, with this sub-address's
+    // per-service API hash. Every registered sub-address reports its hash
+    // uniformly this way, with no per-handler code. The opcode byte is
+    // always present: even a 0-arg read travels in the 2-byte size_2 slot,
+    // so m_cmd_payload[0] is the opcode on both the inline and chunk paths.
+    Status hs;
+    if (m_cmd_payload[0] == kServiceHashOpcode) {
+        const uint32_t sh = m_service_hash[sa];
+        m_resp_payload[0] = static_cast<uint8_t>( sh        & 0xFFu);
+        m_resp_payload[1] = static_cast<uint8_t>((sh >>  8) & 0xFFu);
+        m_resp_payload[2] = static_cast<uint8_t>((sh >> 16) & 0xFFu);
+        m_resp_payload[3] = static_cast<uint8_t>((sh >> 24) & 0xFFu);
+        m_resp_len = 4;
+        hs         = Status::Ok;
+    } else {
+        hs = h->handle(m_active_cmd_header, m_cmd_payload,
+                       m_resp_payload, sizeof(m_resp_payload),
+                       m_resp_len);
+    }
+
+    if (hs != Status::Ok) {
+        // Tag handler detail with the App fault domain before sizing, so the
+        // BC reads it as app/HAL detail rather than a Status code. Note this
+        // can bump the frame up one size slot.
+        prepend_app_fault_tag(m_resp_payload, sizeof(m_resp_payload),
+                              m_resp_len);
+    }
+
+    PayloadSizes ps   = bytes_to_payload_size(m_resp_len);
+    uint32_t wire_len = size_to_bytes(ps);
+    for (uint32_t i = m_resp_len; i < wire_len; ++i) {
+        m_resp_payload[i] = 0;
+    }
+    m_resp_len = wire_len;
+
+    if (hs != Status::Ok) {
+        // Bad Write/Read 2: fault response with App-domain handler detail.
+        send_ack(sa, m_active_cmd_header.get_priority(), ps, true,
+                 wire_len > 0 ? m_resp_payload : nullptr, wire_len);
+        m_state = RtState::Idle;
+        return;
+    }
+
+    if (wire_len <= kHeaderInlinePayloadBytes) {
+        // Pure write (size-0 ack), or a 2-byte read whose response rides
+        // inline in the header (Protocol T2): one frame and we're done.
+        send_ack(sa, m_active_cmd_header.get_priority(), ps, false,
+                 wire_len > 0 ? m_resp_payload : nullptr, wire_len);
+        m_state = RtState::Idle;
+        return;
+    }
+
+    // Read response: send header now, payload on the next tick.
+    MessageHeader resp_hdr;
+    resp_hdr.set_priority(m_active_cmd_header.get_priority());
+    resp_hdr.set_command_flag(false);
+    resp_hdr.set_size(ps);
+    resp_hdr.set_fault_flag(false);
+    resp_hdr.set_sub_address(sa);
+    resp_hdr.set_payload_crc(payload_crc(m_resp_payload, wire_len));
+    resp_hdr.update_header_crc();
+
+    uint8_t buf[6];
+    resp_hdr.serialize(buf, sizeof(buf));
+    int32_t sr = m_transport.send(buf, 6);
+    if (sr != 6) {
+        m_state = RtState::Idle;
+        return;
+    }
+    m_state       = RtState::TxRespPayload;
+    m_deadline_ms = now + kFrameTimeoutMs;
+}
+
 void RemoteTerminal::tick()
 {
     const uint32_t now = m_clock.now_ms();
@@ -662,6 +782,10 @@ void RemoteTerminal::tick()
             m_fault_counter.increment();
             return;
         }
+        // Arrival instant of this command, taken before any further work. The
+        // system handler uses it as the time-sync receive stamp (T2), so the
+        // ack and payload legs stay out of the measured forward path.
+        m_cmd_rx_ms = m_clock.now_ms();
 
         // Fault frame inbound from BC: resync signal. Drop any in-flight
         // state and return to Idle without emitting an ack.
@@ -697,15 +821,15 @@ void RemoteTerminal::tick()
             // The universal GET_SERVICE_HASH (opcode 0x00) is intentionally NOT
             // handled here: a true size-0 frame carries no payload, so there is
             // no opcode byte to inspect. The BC always sends the opcode byte
-            // (a 0-arg read travels in the size_2 slot), so GET_SERVICE_HASH
-            // arrives on the RxPayload path below, never here.
+            // (a 0-arg read travels inline in the size_2 slot), so
+            // GET_SERVICE_HASH arrives on the inline path below, never here.
             m_resp_len = 0;
             Status hs = h->handle(hdr, nullptr,
                                   m_resp_payload, sizeof(m_resp_payload),
                                   m_resp_len);
             bool fault = (hs != Status::Ok);
             if (fault) {
-                // App-domain tag ahead of handler detail (see RxPayload path).
+                // App-domain tag ahead of handler detail (see dispatch_command).
                 prepend_app_fault_tag(m_resp_payload, sizeof(m_resp_payload),
                                       m_resp_len);
             }
@@ -716,6 +840,14 @@ void RemoteTerminal::tick()
             }
             send_ack(sa, hdr.get_priority(), ps, fault,
                      wire_len > 0 ? m_resp_payload : nullptr, wire_len);
+            return;
+        }
+
+        if (declared == kHeaderInlinePayloadBytes) {
+            // Protocol T2: the 2-byte command is inline in the header, so the
+            // RT already has all of it. No header-receipt ack; dispatch now.
+            hdr.get_inline_payload(m_cmd_payload);
+            dispatch_command(now);
             return;
         }
 
@@ -773,81 +905,7 @@ void RemoteTerminal::tick()
             return;
         }
 
-        const uint8_t sa = m_active_cmd_header.get_sub_address();
-        ISubAddressHandler* h = m_handlers[sa];
-        m_resp_len = 0;
-
-        // Universal command: opcode 0x00 (GET_SERVICE_HASH) is answered here by
-        // the framework, before the handler runs, with this sub-address's
-        // per-service API hash. Every registered sub-address reports its hash
-        // uniformly this way, with no per-handler code. The opcode byte is
-        // always present: even a 0-arg read travels in the 2-byte size_2 slot,
-        // so m_cmd_payload[0] is the opcode here on the RxPayload path.
-        Status hs;
-        if (m_cmd_payload[0] == kServiceHashOpcode) {
-            const uint32_t sh = m_service_hash[sa];
-            m_resp_payload[0] = static_cast<uint8_t>( sh        & 0xFFu);
-            m_resp_payload[1] = static_cast<uint8_t>((sh >>  8) & 0xFFu);
-            m_resp_payload[2] = static_cast<uint8_t>((sh >> 16) & 0xFFu);
-            m_resp_payload[3] = static_cast<uint8_t>((sh >> 24) & 0xFFu);
-            m_resp_len = 4;
-            hs         = Status::Ok;
-        } else {
-            hs = h->handle(m_active_cmd_header, m_cmd_payload,
-                           m_resp_payload, sizeof(m_resp_payload),
-                           m_resp_len);
-        }
-
-        if (hs != Status::Ok) {
-            // Tag handler detail with the App fault domain before sizing, so the
-            // BC reads it as app/HAL detail rather than a Status code. Note this
-            // can bump the frame up one size slot.
-            prepend_app_fault_tag(m_resp_payload, sizeof(m_resp_payload),
-                                  m_resp_len);
-        }
-
-        PayloadSizes ps   = bytes_to_payload_size(m_resp_len);
-        uint32_t wire_len = size_to_bytes(ps);
-        for (uint32_t i = m_resp_len; i < wire_len; ++i) {
-            m_resp_payload[i] = 0;
-        }
-        m_resp_len = wire_len;
-
-        if (hs != Status::Ok) {
-            // Bad Write/Read 2: fault response with App-domain handler detail.
-            send_ack(sa, m_active_cmd_header.get_priority(), ps, true,
-                     wire_len > 0 ? m_resp_payload : nullptr, wire_len);
-            m_state = RtState::Idle;
-            return;
-        }
-
-        if (wire_len == 0) {
-            // Pure write: send size-0 ack and we're done.
-            send_ack(sa, m_active_cmd_header.get_priority(),
-                     PayloadSizes::size_0, false, nullptr, 0);
-            m_state = RtState::Idle;
-            return;
-        }
-
-        // Read response: send header now, payload on the next tick.
-        MessageHeader resp_hdr;
-        resp_hdr.set_priority(m_active_cmd_header.get_priority());
-        resp_hdr.set_command_flag(false);
-        resp_hdr.set_size(ps);
-        resp_hdr.set_fault_flag(false);
-        resp_hdr.set_sub_address(sa);
-        resp_hdr.set_payload_crc(payload_crc(m_resp_payload, wire_len));
-        resp_hdr.update_header_crc();
-
-        uint8_t buf[6];
-        resp_hdr.serialize(buf, sizeof(buf));
-        int32_t sr = m_transport.send(buf, 6);
-        if (sr != 6) {
-            m_state = RtState::Idle;
-            return;
-        }
-        m_state       = RtState::TxRespPayload;
-        m_deadline_ms = now + kFrameTimeoutMs;
+        dispatch_command(now);
         return;
     }
 

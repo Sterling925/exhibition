@@ -158,20 +158,20 @@ TEST_CASE("t4", "[usb_cdc][framing]")
 }
 
 
-/// t5: Two complete header+payload transactions deposited back to back are
-/// returned as four correctly ordered, byte-accurate chunks with no desync.
+/// t5: Protocol T2 framing. A size-2 header carries its payload inline, so the
+/// framer goes straight back to header hunting; a following size-4 header still
+/// announces a payload chunk. Deposited back to back, the stream comes out as
+/// three correctly ordered, byte-accurate chunks with no desync.
 TEST_CASE("t5", "[usb_cdc][framing]")
 {
     UsbCdcFrameTransport t(&dummy_transmit);
 
     const std::vector<uint8_t> h1 = make_header(PayloadSizes::size_2, true, 1);
-    const std::vector<uint8_t> p1 = {0x01, 0x02};
     const std::vector<uint8_t> h2 = make_header(PayloadSizes::size_4, true, 2);
     const std::vector<uint8_t> p2 = {0x03, 0x04, 0x05, 0x06};
 
     std::vector<uint8_t> stream;
     stream.insert(stream.end(), h1.begin(), h1.end());
-    stream.insert(stream.end(), p1.begin(), p1.end());
     stream.insert(stream.end(), h2.begin(), h2.end());
     stream.insert(stream.end(), p2.begin(), p2.end());
 
@@ -181,9 +181,7 @@ TEST_CASE("t5", "[usb_cdc][framing]")
 
     REQUIRE(t.receive(out, sizeof(out)) == 6);
     REQUIRE(std::memcmp(out, h1.data(), 6) == 0);
-    REQUIRE(t.receive(out, sizeof(out)) == 2);
-    REQUIRE(std::memcmp(out, p1.data(), 2) == 0);
-    REQUIRE(t.receive(out, sizeof(out)) == 6);
+    REQUIRE(t.receive(out, sizeof(out)) == 6);   // next header, not a payload
     REQUIRE(std::memcmp(out, h2.data(), 6) == 0);
     REQUIRE(t.receive(out, sizeof(out)) == 4);
     REQUIRE(std::memcmp(out, p2.data(), 4) == 0);
@@ -255,16 +253,16 @@ TEST_CASE("t8", "[usb_cdc][resync]")
 
     t.reset_rx();                                 // scheduler abandons the frame
 
-    const std::vector<uint8_t> hdr2 = make_header(PayloadSizes::size_2,
+    const std::vector<uint8_t> hdr2 = make_header(PayloadSizes::size_6,
                                                   true, /*sub_addr=*/2);
-    const std::vector<uint8_t> payload2 = { 0x77, 0x88 };
+    const std::vector<uint8_t> payload2 = { 0x77, 0x88, 0x99, 0xAA, 0xBB, 0xCC };
     t.deposit_rx(hdr2.data(), 6);
-    t.deposit_rx(payload2.data(), 2);
+    t.deposit_rx(payload2.data(), 6);
 
     REQUIRE(t.receive(out, sizeof(out)) == 6);
     REQUIRE(std::memcmp(out, hdr2.data(), 6) == 0);
-    REQUIRE(t.receive(out, sizeof(out)) == 2);
-    REQUIRE(std::memcmp(out, payload2.data(), 2) == 0);
+    REQUIRE(t.receive(out, sizeof(out)) == 6);
+    REQUIRE(std::memcmp(out, payload2.data(), 6) == 0);
     REQUIRE(t.receive(out, sizeof(out)) == 0);
 }
 
@@ -292,16 +290,16 @@ TEST_CASE("t9", "[usb_cdc][resync]")
     // framer is already idle: must be a no-op.
     t.reset_rx();
 
-    const std::vector<uint8_t> hdr2 = make_header(PayloadSizes::size_2,
+    const std::vector<uint8_t> hdr2 = make_header(PayloadSizes::size_6,
                                                   true, /*sub_addr=*/2);
-    const std::vector<uint8_t> p2 = { 0x55, 0x66 };
+    const std::vector<uint8_t> p2 = { 0x55, 0x66, 0x77, 0x88, 0x99, 0xAA };
     t.deposit_rx(hdr2.data(), 6);
-    t.deposit_rx(p2.data(), 2);
+    t.deposit_rx(p2.data(), 6);
 
     REQUIRE(t.receive(out, sizeof(out)) == 6);
     REQUIRE(std::memcmp(out, hdr2.data(), 6) == 0);
-    REQUIRE(t.receive(out, sizeof(out)) == 2);
-    REQUIRE(std::memcmp(out, p2.data(), 2) == 0);
+    REQUIRE(t.receive(out, sizeof(out)) == 6);
+    REQUIRE(std::memcmp(out, p2.data(), 6) == 0);
 }
 
 

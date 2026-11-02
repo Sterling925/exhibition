@@ -201,6 +201,29 @@ independent handlers on one RT.
 - Sub-address assignment (which physical device or function maps to which
   number) is an application-layer concern not defined by Protocol T1.
 
+### 7.1 Reserved universal command — `GET_SERVICE_HASH` (opcode `0x00`)
+
+The first byte of a command payload is the opcode. **Opcode `0x00` is reserved
+protocol-wide** for a universal command, `GET_SERVICE_HASH`, that every
+registered sub-address answers identically: it returns a 4-byte little-endian
+*per-service hash* — an FNV-1a hash over just that sub-address's command/response
+vocabulary. No device opcode may reuse `0x00`.
+
+The RT answers `0x00` framework-side, before dispatching to the sub-address's
+handler, so the response is uniform and a handler cannot override it. An
+unregistered sub-address still faults `InvalidSubAddress` (the routing check runs
+first); the universal command never fabricates a hash for an absent service.
+
+On the wire it is a size-0 read (§8.4 semantics) whose response is the 4-byte
+hash. (Like every 0-arg read, the opcode byte still travels — the command is
+sent in the smallest payload slot that holds it.)
+
+Two complementary version checks result: the single global *fingerprint* (read
+from the system handler) confirms the whole API matches in one comparison; the
+per-service hashes localize *which* sub-address diverged when it does not. Every
+sub-address of the same peripheral kind reports the same per-service hash,
+because the hash covers only the command vocabulary.
+
 ---
 
 ## 8. Transaction Wire Flow

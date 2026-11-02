@@ -45,6 +45,11 @@ enum class PayloadSizes : uint8_t {
     size_2048 = 0x17,
 };
 
+/// @brief Payload size carried inline in header bytes 2-3 (Protocol T2).
+/// @details A size_2 frame has no payload chunk; its two payload bytes replace
+///          the payload CRC and are covered by the header CRC.
+constexpr uint32_t kHeaderInlinePayloadBytes = 2;
+
 enum class MessagePriorities : uint8_t  {
     Critical = 0x00,
     High = 0x01,
@@ -52,12 +57,12 @@ enum class MessagePriorities : uint8_t  {
     Low = 0x03,
 };
 
-/// @brief 6-byte packed Protocol T1 frame header. CRC-protected. Carried at
-///        the start of every Protocol T1 frame on the wire.
+/// @brief 6-byte packed Protocol T2 frame header. CRC-protected. Carried at
+///        the start of every Protocol T2 frame on the wire.
 class MessageHeader {
     private:
 
-    /// @brief Protocol T1 header byte layout (6 bytes, packed)
+    /// @brief Protocol T2 header byte layout (6 bytes, packed)
     /// @details
     /// 2 bit priority, 0 is highest priority, 3 is lowest priority
     /// 1 bit command/response, 0 = response, 1 = command
@@ -65,7 +70,7 @@ class MessageHeader {
     /// 3 bit transmitted size // small sizes 0,2,4,6,8,10,12,14 // large sizes 16, 32, 64, 128, 256, 512, 1024, 2048
     /// 1 bit Communication Fault detected, 0 is fault, 1 is no fault payload will provide details, will cause clearing of bus states in RT if sent by BC
     /// 8 bit sub address // Value 0 is reserved
-    /// 16 bit payload CRC
+    /// 16 bit payload CRC (size >= 4), inline payload (size 2), or zero (size 0)
     /// 16 bit header CRC
     uint8_t m_header[6];
 
@@ -117,6 +122,10 @@ class MessageHeader {
     /// @param crc CRC16 for payload size > 0, else zero
     void set_payload_crc(uint16_t crc);
 
+    /// @brief Place a 2-byte payload inline in header bytes 2-3 (size_2 frames)
+    /// @param payload Two payload bytes; byte 2 = payload[0], byte 3 = payload[1]
+    void set_inline_payload(uint8_t const* payload);
+
     /// @brief Calculate CRC16 of header and place in header CRC location
     void update_header_crc();
 
@@ -165,6 +174,14 @@ class MessageHeader {
     /// @brief Get CRC16 of payload data
     /// @return CRC16 value
     uint16_t get_payload_crc() const;
+
+    /// @brief Copy the inline payload out of header bytes 2-3 (size_2 frames)
+    /// @param out Destination for two bytes, in wire order
+    void get_inline_payload(uint8_t* out) const;
+
+    /// @brief Is this header followed by a payload chunk on the wire
+    /// @return `true` for sizes >= 4; `false` for size 0 and inline size 2
+    bool has_payload_chunk() const;
 
     /// @brief Get CRC16 of header
     /// @return CRC16 value

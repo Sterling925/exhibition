@@ -71,8 +71,22 @@ int32_t LoggingFrameTransport::send(uint8_t const* bytes, uint32_t length)
             m_log.line("INFO", buf);
             m_log.hex("DEBUG", "  bytes: ", bytes, length);
             m_tx_cmd_sa = hdr.get_sub_address();
-            m_tx_state  = (sz > 0u) ? TxState::ExpectCmdPayload
-                                    : TxState::ExpectCmdHeader;
+            if (sz == kHeaderInlinePayloadBytes) {
+                // Protocol T2: the 2-byte command rides inline in the header.
+                uint8_t inl[kHeaderInlinePayloadBytes];
+                hdr.get_inline_payload(inl);
+                char const* name = (m_op_name != nullptr)
+                                       ? m_op_name(m_tx_cmd_sa, inl[0])
+                                       : "?";
+                std::snprintf(buf, sizeof(buf),
+                              "TX INLINE sa=%s op=%s(0x%02X) arg=0x%02X",
+                              sa_name(m_tx_cmd_sa), name,
+                              static_cast<unsigned>(inl[0]),
+                              static_cast<unsigned>(inl[1]));
+                m_log.line("INFO", buf);
+            }
+            m_tx_state  = hdr.has_payload_chunk() ? TxState::ExpectCmdPayload
+                                                  : TxState::ExpectCmdHeader;
         } else {
             m_log.line("INFO", "TX (unrecognized frame)");
             m_log.hex("DEBUG", "  bytes: ", bytes, length);
@@ -130,9 +144,16 @@ int32_t LoggingFrameTransport::receive(uint8_t* out, uint32_t max_length)
             if (fault) {
                 m_log.line("WARN", "remote fault flagged in response header");
             }
+            if (sz == kHeaderInlinePayloadBytes) {
+                // Protocol T2: the 2-byte response rides inline in the header.
+                uint8_t inl[kHeaderInlinePayloadBytes];
+                hdr.get_inline_payload(inl);
+                m_log.hex("INFO", "  inline payload: ", inl,
+                          kHeaderInlinePayloadBytes);
+            }
             m_rx_sa    = hdr.get_sub_address();
-            m_rx_state = (sz > 0u) ? RxState::ExpectPayload
-                                   : RxState::ExpectHeader;
+            m_rx_state = hdr.has_payload_chunk() ? RxState::ExpectPayload
+                                                 : RxState::ExpectHeader;
         } else {
             m_log.line("INFO", "RX (unrecognized frame)");
             m_log.hex("DEBUG", "  bytes: ", out, static_cast<uint32_t>(r));

@@ -5,7 +5,7 @@ SPDX-FileCopyrightText: 2026 https://github.com/Sterling925
 
 # Communication
 
-**Protocol T1** — a small message protocol and FIFO scheduler intended to run
+**Protocol T2** — a small message protocol and FIFO scheduler intended to run
 in firmware on an embedded ARM core. The protocol semantics are a single
 **Bus Controller** (BC) drives all transactions, **Remote Terminals** (RTs)
 respond.
@@ -26,7 +26,10 @@ Working examples for every public API are in
 
 ---
 
-## Protocol T1
+## Protocol T2
+
+T2 is [Protocol T1](protocol_t1.md) plus one optimization: a 2-byte payload rides
+inline in the header. Full spec: [`protocol_t2.md`](protocol_t2.md).
 
 ### The header
 
@@ -40,8 +43,8 @@ Every frame on the wire begins with a 6-byte `MessageHeader`:
 | Transmitted size | 3 | Indexes into the size table; together with the large-frame bit gives one of 16 fixed payload sizes. |
 | Fault flag | 1 | **Inverted polarity: 0 = fault, 1 = no fault.** Default-constructed `MessageHeader`s are fault-flagged until `set_fault_flag(false)` is called. |
 | Sub-address | 8 | Routes the message to a sub-component (e.g. one motor on a multi-motor board). **Value 0 is reserved.** |
-| Payload CRC | 16 | CRC-16/MODBUS over the payload bytes; 0 for empty payloads. |
-| Header CRC | 16 | CRC-16/MODBUS over header bytes 0..3. |
+| Payload CRC / inline payload | 16 | Size ≥ 4: CRC-16/MODBUS over the payload bytes. Size 2: the two payload bytes themselves (no payload chunk follows). Size 0: zero. |
+| Header CRC | 16 | CRC-16/MODBUS over header bytes 0..3 (so it also covers an inline payload). |
 
 Payload sizes are sparse: `{0, 2, 4, 6, 8, 10, 12, 14, 16, 32, 64, 128, 256,
 512, 1024, 2048}`. Smaller payloads must be zero-padded up to the next valid
@@ -54,7 +57,7 @@ The protocol is half-duplex; BC always initiates. Each transmission is one
 *frame* = either a 6-byte serialized header or a payload block of the size
 declared in the preceding header.
 
-**Write (cmd size = X, X > 0):**
+**Write (cmd size = X, X ≥ 4):**
 
 ```
 BC -> RT : Header (cmd, size = X)
@@ -63,7 +66,7 @@ BC -> RT : Payload (X bytes)
 RT -> BC : Header (response, size = 0)        [final ack]
 ```
 
-**Read (cmd size = X, X > 0, response size = Y):**
+**Read (cmd size = X, X ≥ 4, response size = Y):**
 
 ```
 BC -> RT : Header (cmd, size = X)
@@ -73,14 +76,19 @@ RT -> BC : Header (response, size = Y)        [response header]
 RT -> BC : Payload (Y bytes)
 ```
 
-**Size-0 cmds collapse the flow:**
+**Size-0 and inline (size-2) cmds collapse the flow:** the header carries the
+whole command, so the intermediate ack is omitted.
 
-- Size-0 write: just `BC→RT cmd header` then `RT→BC ack`. Done.
-- Size-0 read: just `BC→RT cmd header` then `RT→BC response header (size=Y)`
-  then `RT→BC payload (Y bytes)`. The intermediate ack is omitted.
+- Write: just `BC→RT cmd header` then `RT→BC ack`. Done.
+- Read: just `BC→RT cmd header` then `RT→BC response header (size=Y)` then
+  `RT→BC payload (Y bytes)`.
+
+**A size-2 response** (or fault) is inline in the response header too: no
+payload frame follows it. Every chunk's size is still known before it arrives,
+so a receive driver can always hand an exact-length read to the peripheral.
 
 **Faults** flip the fault bit on whichever response header reports them and
-carry a fault-detail payload of the indicated size. The BC reports a
+carry a fault-detail payload of the indicated size (inline when it is 2 bytes). The BC reports a
 `RemoteFault` status to its caller after consuming the fault payload.
 
 Fault payloads are self-describing (v2 format): byte 0 is a `FaultDomain` tag
@@ -103,7 +111,8 @@ RT generates fault frames when:
 - The cmd's declared payload exceeds the RT's buffer (2-byte
   `{Protocol, PayloadTooLarge}` fault frame).
 
-Protocol faults are always exactly 2 bytes (fits the `size_2` slot). The BC
+Protocol faults are always exactly 2 bytes (fits the `size_2` slot, so they
+are always a single inline fault header). The BC
 reports `RemoteFault` to its caller and exposes the fault payload; the generated
 blocking client inspects byte 0 (`FaultDomain`) and byte 1 (reason) to produce a
 log line, e.g. `RemoteFault (remote: PayloadTooLarge)`. A header that fails its
@@ -358,14 +367,15 @@ façade is the generated `RtClient::sync_once()`.
 | | Captured by | When |
 |---|---|---|
 | **T1** | BC | sending `SYNC_PROBE` |
-| **T2** | RT | receiving `SYNC_PROBE` |
+| **T2** | RT | the `SYNC_PROBE` command header arrives |
 | **T3** | RT | just before sending the `SYNC_PROBE` response |
 | **T4** | BC | the `SYNC_PROBE` response arrives |
 
 The BC runs three command types against sub-address 1:
 
 1. **`SYNC_PROBE` (0x06)** — 6-byte payload `[opcode, units, uint32 value]`, `value` = T1.
-   The RT caches T1, stamps T2 on receipt and T3 just before replying, and returns both
+   The RT caches T1, takes T2 from the command header's arrival (before the ack and
+   payload legs, so the forward path matches the one-leg return) and T3 just before replying, and returns both
    (two `uint32`, `size_8`). The BC records T4 when the reply lands.
 2. **`SYNC_FINAL` (0x07)** — 6-byte payload `[opcode, units, uint32 value]`, `value` = T4.
    The RT now has all four timestamps, measures this exchange, pushes the
