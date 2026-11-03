@@ -151,6 +151,12 @@ command (opcode `0x00`) returning a per-service hash over just its command vocab
 | STM32CubeIDE or ARM GCC toolchain | Build and flash `exhibition_rt/` |
 | CMake (≥ 3.15), Ninja, and a C++17 compiler (GCC, Clang, or MSVC) | Build `exhibition_bc/` and the C++ unit tests |
 
+On Ubuntu, `scripts/setup_dev_env.sh` installs whatever is missing from the above (except
+STM32CubeMX/CubeIDE): build-essential, CMake, Ninja, the `arm-none-eabi` GCC toolchain with
+newlib and libstdc++, `stlink-tools` and `gdb-multiarch` for flashing/debugging over ST-LINK,
+and Rust via rustup. It also adds you to the `dialout` group for serial access and finishes
+by test-building `example/rt`. Run it with `--dry-run` first to see what it would change.
+
 ## How to Build
 
 ```
