@@ -459,6 +459,34 @@ fn render_rt_client_header(slots: &[DeviceSlot]) -> String {
     s.push_str("    ///        detected (timeouts + CRC / malformed-frame errors on the BC\n");
     s.push_str("    ///        side). Does not send any bus transaction.\n");
     s.push_str("    uint32_t bc_fault_count() const { return m_bc.fault_count(); }\n\n");
+    s.push_str("    /// @brief Raw, blocking transaction with any sub-address, for handlers\n");
+    s.push_str("    ///        outside the generated API (e.g. ones registered on the RT\n");
+    s.push_str("    ///        from rt_user_init()).\n");
+    s.push_str("    /// @details Sends @p cmd (opcode first), zero-padded up to the next valid\n");
+    s.push_str("    ///          payload size, and blocks until the RT answers, like the\n");
+    s.push_str("    ///          generated methods. The command is a read when @p resp_cap\n");
+    s.push_str("    ///          is non-zero. The RT's handler sees the padded length, so a\n");
+    s.push_str("    ///          variable-length command should carry its own length field.\n");
+    s.push_str("    /// @param sub_address Target sub-address.\n");
+    s.push_str("    /// @param cmd Command payload bytes, opcode first. May be null only\n");
+    s.push_str("    ///        when @p cmd_len is 0.\n");
+    s.push_str("    /// @param cmd_len Command length in bytes, 0..kMaxPayloadBytes.\n");
+    s.push_str("    /// @param resp Response buffer. May be null only when @p resp_cap is 0.\n");
+    s.push_str("    /// @param resp_cap Largest response expected, 0..kMaxPayloadBytes;\n");
+    s.push_str("    ///        0 for a write.\n");
+    s.push_str("    /// @param resp_len_out Optional; receives the number of bytes copied\n");
+    s.push_str("    ///        into @p resp (the wire payload length, capped at @p resp_cap;\n");
+    s.push_str("    ///        wire payloads are zero-padded to a valid size).\n");
+    s.push_str("    /// @param log_success When false, only failures are logged. Use it for\n");
+    s.push_str("    ///        high-rate polling so the log doesn't grow with every call.\n");
+    s.push_str("    /// @return Status::Ok on success; ::HandlerError for a null buffer with\n");
+    s.push_str("    ///         a non-zero length; ::PayloadTooLarge for a length over\n");
+    s.push_str("    ///         kMaxPayloadBytes; otherwise the transaction's status.\n");
+    s.push_str("    Status transact(uint8_t sub_address,\n");
+    s.push_str("                    uint8_t const* cmd, uint32_t cmd_len,\n");
+    s.push_str("                    uint8_t* resp, uint32_t resp_cap,\n");
+    s.push_str("                    uint32_t* resp_len_out = nullptr,\n");
+    s.push_str("                    bool log_success = true);\n\n");
 
     for slot in slots {
         for m in &slot.members {
@@ -753,9 +781,78 @@ fn render_rt_client_source(slots: &[DeviceSlot]) -> String {
 
     s.push_str(&render_system_handler_impl(slots));
     s.push_str(&render_sync_impl());
+    s.push_str(TRANSACT_IMPL);
 
     s
 }
+
+
+/// `RtClient::transact()` — the raw escape hatch for user-registered RT
+/// handlers. Appended verbatim to the end of rt_client.cpp; it relies on the
+/// file-local `run_one` from `BLOCKING_HELPER`.
+const TRANSACT_IMPL: &str = r#"
+Status RtClient::transact(uint8_t sub_address,
+                          uint8_t const* cmd, uint32_t cmd_len,
+                          uint8_t* resp, uint32_t resp_cap,
+                          uint32_t* resp_len_out,
+                          bool log_success)
+{
+    if (resp_len_out != nullptr) {
+        *resp_len_out = 0u;
+    }
+    if ((cmd == nullptr && cmd_len > 0u) || (resp == nullptr && resp_cap > 0u)) {
+        return Status::HandlerError;
+    }
+    if (cmd_len > kMaxPayloadBytes || resp_cap > kMaxPayloadBytes) {
+        return Status::PayloadTooLarge;
+    }
+
+    Request req{};
+    req.sub_address = sub_address;
+    req.priority    = MessagePriorities::Medium;
+    req.is_read     = (resp_cap > 0u);
+
+    // Command: copy, then zero-pad up to the next valid payload size.
+    const PayloadSizes cmd_ps = bytes_to_payload_size(cmd_len);
+    const uint32_t cmd_slot   = payload_size_to_bytes(cmd_ps);
+    uint8_t cmd_scratch[kMaxPayloadBytes];
+    uint8_t* cmd_buf = (cmd_slot <= kInlinePayloadBytes) ? req.cmd_inline : cmd_scratch;
+    if (cmd_len > 0u) {
+        std::memcpy(cmd_buf, cmd, cmd_len);
+    }
+    if (cmd_slot > cmd_len) {
+        std::memset(cmd_buf + cmd_len, 0, cmd_slot - cmd_len);
+    }
+    req.cmd_size = cmd_ps;
+    req.cmd_len  = cmd_slot;
+    req.cmd_ext  = (cmd_slot > kInlinePayloadBytes) ? cmd_scratch : nullptr;
+
+    // Response: large slots land in a caller-owned buffer (resp_ext); the
+    // completion callback then copies the payload into `sink`.
+    uint8_t resp_ext[kMaxPayloadBytes];
+    uint8_t sink[kMaxPayloadBytes];
+    if (req.is_read) {
+        const uint32_t resp_slot = payload_size_to_bytes(bytes_to_payload_size(resp_cap));
+        req.resp_buf_max = resp_slot;
+        req.resp_ext     = (resp_slot > kInlinePayloadBytes) ? resp_ext : nullptr;
+    } else {
+        req.resp_buf_max = 0u;
+        req.resp_ext     = nullptr;
+    }
+
+    uint32_t got = 0u;
+    const Status s = run_one(m_bc, m_clock, req, sink, sizeof(sink), &got, m_log,
+                             log_success);
+    if (s == Status::Ok && req.is_read) {
+        const uint32_t n = (got < resp_cap) ? got : resp_cap;
+        std::memcpy(resp, sink, n);
+        if (resp_len_out != nullptr) {
+            *resp_len_out = n;
+        }
+    }
+    return s;
+}
+"#;
 
 
 /// The blocking façade core — included verbatim once per rt_client.cpp.
@@ -849,17 +946,19 @@ void log_op(Logger& log, const Request& req, Status status,
 /// @brief Submit `req` and spin tick() until the completion callback fires.
 /// @details
 /// The BC self-enforces kFrameTimeoutMs per wire frame; the outer
-/// 8x guard is a safety net in case the state machine itself stalls. The
-/// final Status is logged on every exit path so detected errors (Timeout,
+/// 8x guard is a safety net in case the state machine itself stalls. A
+/// failing Status is logged on every exit path so detected errors (Timeout,
 /// CrcFail*, QueueFull, ...) land in the log even though the wire-level
-/// LoggingFrameTransport only sees raw bytes.
+/// LoggingFrameTransport only sees raw bytes. A success is logged too
+/// unless `log_success` is false (for callers that poll at a high rate).
 Status run_one(BusController& bc,
                   IClock& clock,
                   const Request& req,
                   uint8_t* out_buf,
                   uint32_t out_cap,
                   uint32_t* out_len_opt,
-                  Logger& log)
+                  Logger& log,
+                  bool log_success = true)
 {
     BlockingCtx ctx;
     ctx.status            = Status::Ok;
@@ -905,8 +1004,10 @@ Status run_one(BusController& bc,
             return Status::Timeout;
         }
     }
-    log_op(log, req, ctx.status, ctx.has_remote, ctx.remote_domain,
-           ctx.remote_code);
+    if (ctx.status != Status::Ok || log_success) {
+        log_op(log, req, ctx.status, ctx.has_remote, ctx.remote_domain,
+               ctx.remote_code);
+    }
     return ctx.status;
 }
 
