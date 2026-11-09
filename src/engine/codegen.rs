@@ -469,6 +469,22 @@ fn render_registry_header() -> String {
     s.push_str("}\n");
     s.push_str("#endif\n");
     s.push('\n');
+    // Optional user hook (C++ only, so a C `main.c` including this header is
+    // unaffected). `device_registry.cpp` supplies a weak no-op default.
+    s.push_str("#ifdef __cplusplus\n");
+    s.push_str("class RemoteTerminal;\n");
+    s.push('\n');
+    s.push_str("/// @brief Optional user hook, called once at the end of `init_rt()`,\n");
+    s.push_str("///        after every generated handler is registered.\n");
+    s.push_str("/// @details Define it in your own source file (outside the generated\n");
+    s.push_str("///          folders, so regeneration never touches it) to register extra\n");
+    s.push_str("///          ISubAddressHandler instances on unused sub-addresses, e.g.\n");
+    s.push_str("///          `rt.register_handler(30, &my_handler, kMyServiceHash);`.\n");
+    s.push_str("///          `device_registry.cpp` provides an empty weak default, so a\n");
+    s.push_str("///          project that does not define it is unaffected.\n");
+    s.push_str("void rt_user_init(RemoteTerminal& rt);\n");
+    s.push_str("#endif\n");
+    s.push('\n');
     s.push_str("#endif // DEVICE_REGISTRY_H\n");
     s
 }
@@ -556,6 +572,14 @@ fn render_registry_source(slots: &[DeviceSlot], transport: &TransportChoice) -> 
     // RT singleton + entry points.
     s.push_str("static RemoteTerminal g_rt(g_transport, g_clock, g_fault_counter);\n");
     s.push('\n');
+    // Weak no-op default for the user hook declared in device_registry.h; a
+    // definition in user code replaces it at link time.
+    s.push_str("// Weak default for the optional user hook declared in device_registry.h.\n");
+    s.push_str("// A definition in user code replaces it at link time.\n");
+    s.push_str("__attribute__((weak)) void rt_user_init(RemoteTerminal& rt)\n{\n");
+    s.push_str("    (void)rt;\n");
+    s.push_str("}\n");
+    s.push('\n');
     s.push_str("void init_rt()\n{\n");
     // Cold-start invariant: SystemCoreClock must reflect the post-PLL frequency before the
     // clock latches its nominal SysTick reload. SystemClock_Config() already updates it, but
@@ -580,6 +604,8 @@ fn render_registry_source(slots: &[DeviceSlot], transport: &TransportChoice) -> 
             commands::service_hash_const_name(commands::for_kind(slot.kind)),
         ));
     }
+    s.push_str("    // Let user code register its own handlers (no-op unless defined).\n");
+    s.push_str("    rt_user_init(g_rt);\n");
     s.push_str("}\n");
     s.push('\n');
     s.push_str("void tick_rt()\n{\n");

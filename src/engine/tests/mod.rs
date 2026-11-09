@@ -1604,6 +1604,86 @@ fn t43() {
 }
 
 
+/// t44
+///
+/// Verify the optional user hook: `device_registry.h` declares
+/// `rt_user_init(RemoteTerminal&)` for C++ only (outside the `extern "C"` block,
+/// so a C `main.c` still compiles), and `device_registry.cpp` defines a weak
+/// no-op default and calls the hook at the end of `init_rt()`, after every
+/// generated `register_handler`.
+#[test]
+fn t44() {
+    let devices = fixture_set();
+    let transport = TransportChoice::Uart {
+        bus_name: "USART1".to_string(),
+        hal_handle: "huart1".to_string(),
+        baud_rate: None,
+    };
+    let tmp = unique_tmp_dir("exhibition_engine_t44");
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    let art = build_artifacts(&devices, &transport).expect("build_artifacts");
+    generate_rt(&art, &transport, &tmp).expect("generate_rt should succeed");
+
+    let header = std::fs::read_to_string(tmp.join(INC_DIR_REL).join("device_registry.h")).unwrap();
+    let decl = header.find("void rt_user_init(RemoteTerminal& rt);")
+        .expect("header declares the user hook");
+    let c_block_end = header.find("}\n#endif").expect("extern \"C\" block closes");
+    assert!(decl > c_block_end, "hook is declared after (outside) the extern \"C\" block");
+    let guard = header[..decl].rfind("#ifdef __cplusplus").expect("C++ guard");
+    assert!(guard > c_block_end, "hook declaration sits in its own C++-only guard");
+    assert!(header.contains("class RemoteTerminal;"), "RemoteTerminal is forward-declared");
+
+    let registry = std::fs::read_to_string(tmp.join(SRC_DIR_REL).join("device_registry.cpp")).unwrap();
+    assert!(registry.contains("__attribute__((weak)) void rt_user_init(RemoteTerminal& rt)"),
+            "registry provides a weak default");
+    let init = registry.find("void init_rt()").expect("init_rt defined");
+    let tick = registry.find("void tick_rt()").expect("tick_rt defined");
+    let call = registry.find("    rt_user_init(g_rt);").expect("init_rt calls the hook");
+    let last_register = registry.rfind("g_rt.register_handler(").expect("handlers registered");
+    assert!(init < call && call < tick, "hook is called inside init_rt()");
+    assert!(last_register < call, "hook runs after every generated registration");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+
+/// t45
+///
+/// Verify every device-handler source template that calls the
+/// `extract_*` / `emplace_*` byte helpers includes `helper_functions.h` itself
+/// instead of relying on a transitive include. Regression guard for the UART
+/// handler, which used `extract_u16_le` without the include and failed to
+/// compile.
+#[test]
+fn t45() {
+    use crate::engine::addresses::DeviceKind;
+    use crate::engine::autogen_content::device_handler_files;
+
+    // Every DeviceKind; extend this list when a kind is added.
+    let kinds = [
+        DeviceKind::GpioOutput, DeviceKind::GpioInput, DeviceKind::Adc, DeviceKind::Dac,
+        DeviceKind::Pwm, DeviceKind::Qspi, DeviceKind::Rtc, DeviceKind::Spi,
+        DeviceKind::Uart, DeviceKind::I2c, DeviceKind::Can,
+    ];
+    let mut checked = Vec::new();
+    for kind in kinds {
+        for f in device_handler_files(kind) {
+            if !f.rel_path.ends_with(".cpp") {
+                continue;
+            }
+            if f.contents.contains("extract_") || f.contents.contains("emplace_") {
+                assert!(f.contents.contains("#include \"../common/helper_functions.h\""),
+                        "{} uses the byte helpers but does not include helper_functions.h",
+                        f.rel_path);
+                checked.push(f.rel_path);
+            }
+        }
+    }
+    assert!(checked.contains(&"devices/uart_handler.cpp"),
+            "the UART handler uses the byte helpers and must be checked; checked {checked:?}");
+}
+
+
 /// Build a fresh temporary directory under `/media/ramdisk` (per the
 /// user's CLAUDE.md preference for ramdisk-backed temporary files), or
 /// fall back to `std::env::temp_dir` if the ramdisk is unavailable.

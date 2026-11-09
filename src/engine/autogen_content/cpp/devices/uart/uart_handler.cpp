@@ -4,6 +4,7 @@
 #include "uart_handler.h"
 
 #include "../../generated/command_ids.h"
+#include "../common/helper_functions.h"
 
 
 static constexpr uint32_t kUartTimeoutMs = 50;

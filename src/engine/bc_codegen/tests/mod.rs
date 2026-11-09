@@ -630,3 +630,41 @@ fn t10() {
 
     let _ = std::fs::remove_dir_all(&tmp);
 }
+
+
+/// t11
+///
+/// Verify the raw `RtClient::transact()` escape hatch for user-registered RT
+/// handlers: declared public in rt_client.h, defined in rt_client.cpp, and
+/// routed through `run_one` with the caller's `log_success` flag. `run_one`
+/// must still log every failure but skip the success line when asked.
+#[test]
+fn t11() {
+    let devices = rich_fixture();
+    let transport = rt_transport();
+    let art = build_artifacts(&devices, &transport).unwrap();
+
+    let tmp = unique_tmp_dir("exhibition_bc_t11");
+    std::fs::create_dir_all(&tmp).expect("mkdir");
+    write_bc_project(&tmp, &art.slots, &transport, &art.manifest_files, art.fingerprint)
+        .unwrap();
+    let project = tmp.join(BC_OUTPUT_DIR_NAME);
+
+    let header = std::fs::read_to_string(project.join("rt_client.h")).unwrap();
+    let class_start = header.find("class RtClient {").expect("RtClient declared");
+    let public = class_start + header[class_start..].find("    public:").expect("public section");
+    let decl = header.find("    Status transact(uint8_t sub_address,").expect("transact declared");
+    assert!(decl > public, "transact is in RtClient's public section");
+    assert!(header.contains("bool log_success = true);"), "log_success defaults to true");
+
+    let source = std::fs::read_to_string(project.join("rt_client.cpp")).unwrap();
+    assert!(source.contains("Status RtClient::transact(uint8_t sub_address,"),
+            "transact defined");
+    assert!(source.contains("run_one(m_bc, m_clock, req, sink, sizeof(sink), &got, m_log,\n                             log_success);"),
+            "transact forwards log_success to run_one");
+    assert!(source.contains("bool log_success = true)"), "run_one takes log_success");
+    assert!(source.contains("if (ctx.status != Status::Ok || log_success) {"),
+            "run_one always logs failures, and successes only when asked");
+
+    let _ = std::fs::remove_dir_all(&tmp);
+}

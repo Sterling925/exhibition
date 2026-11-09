@@ -75,6 +75,14 @@ untouched. If your `main.c` isn't found next to the generated sources, or a
 `USER CODE` region is missing, the generator prints the exact lines to add by
 hand (see `INTEGRATION_GUIDE.md`).
 
+**Adding your own handlers:** define `void rt_user_init(RemoteTerminal& rt)` in
+your own source file, outside the generated folders. `init_rt()` calls it after
+every generated handler is registered, so it can register extra
+`ISubAddressHandler`s on unused sub-addresses
+(`rt.register_handler(30, &my_handler, kMyServiceHash)`). The generated
+registry provides an empty weak default, so projects that don't define it are
+unaffected. On the host, call them with `RtClient::transact()` (below).
+
 ### `exhibition_bc/` — Bus Controller (host-side test client)
 
 Runs on a desktop or laptop. Communicates with the RT over a serial port.
@@ -105,6 +113,18 @@ client.verify_service_hashes();       // on mismatch, logs which sub-address div
 client.gpio_PA5.set();                // drive PA5 high
 uint16_t counts = client.adc_ADC1_IN0.sample();  // read ADC channel
 client.uart_USART2.tx(buf, len);      // send bytes over USART2
+```
+
+For a handler you registered yourself from `rt_user_init()`, use the raw
+`transact()` call. The command starts with your opcode and is a read when
+`resp_cap` is non-zero. Pass `log_success = false` when polling at a high rate,
+so only failures are logged:
+
+```cpp
+uint8_t cmd[2] = {0x01, 4};
+uint8_t resp[4];
+uint32_t got = 0;
+client.transact(30, cmd, sizeof(cmd), resp, sizeof(resp), &got, /*log_success=*/false);
 ```
 
 ## Wire Protocol
